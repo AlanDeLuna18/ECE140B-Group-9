@@ -1,0 +1,52 @@
+services:
+
+  # InfluxDB stores time-series sensor readings such as soil moisture and watering events.
+  influxdb:
+    image: influxdb:2.8
+    container_name: smart-watering-influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+
+    # Create the user, organization, bucket, and API token.
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: password123
+      DOCKER_INFLUXDB_INIT_ORG: plant-org
+      DOCKER_INFLUXDB_INIT_BUCKET: plant-data
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: plant-token
+
+  # FastAPI backend writes plant sensor readings into the InfluxDB service.
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: smart-watering-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../backend/data:/app/data
+    depends_on:
+      - influxdb
+    environment:
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: plant-token
+      INFLUX_ORG: plant-org
+      INFLUX_BUCKET: plant-data
+
+  # Next.js frontend dashboard for devices, plants, groups, and manual watering.
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: smart-watering-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+volumes:
+  influxdb-data:
