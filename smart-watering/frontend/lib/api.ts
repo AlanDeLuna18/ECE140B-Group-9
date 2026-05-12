@@ -102,6 +102,7 @@ export type CreateDeviceInput = {
 async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,
@@ -114,6 +115,12 @@ async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+export function logout() {
+  return apiRequest<{ message: string }>("/logout", {
+    method: "POST",
+  });
 }
 
 export function getDevices() {

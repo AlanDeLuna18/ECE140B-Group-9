@@ -44,3 +44,4 @@ class PlantGroup(Base):
     auto_mode: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_watered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ← ADD THIS

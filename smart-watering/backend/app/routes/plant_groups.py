@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Cookie
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from app.database import get_db
+from app.database import get_db, engine
 from app.influx_client import influx_sensor_client
 from app.models import Device, PlantGroup, PlantType
 from app.schemas import (
@@ -18,22 +19,37 @@ from app.schemas import (
 router = APIRouter(prefix="/api/plant-groups", tags=["plant groups"])
 
 
-@router.get("", response_model=list[PlantGroupResponse])
-def list_plant_groups(db: Session = Depends(get_db)) -> list[PlantGroup]:
-    """List physical plants."""
+def get_current_user(session_token: str | None = Cookie(None)):
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-    return db.query(PlantGroup).order_by(PlantGroup.id).all()
+    with engine.connect() as conn:
+        user = conn.execute(
+            text("""
+                SELECT users.id, users.username FROM sessions 
+                JOIN users ON sessions.user_id = users.id 
+                WHERE sessions.session_token = :st
+            """),
+            {"st": session_token}
+        ).mappings().first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return user
+
+
+@router.get("", response_model=list[PlantGroupResponse])
+def list_plant_groups(db: Session = Depends(get_db), current_user=Depends(get_current_user)) -> list[PlantGroup]:
+    return db.query(PlantGroup).filter(PlantGroup.user_id == current_user["id"]).order_by(PlantGroup.id).all()
 
 
 @router.post("", response_model=PlantGroupResponse, status_code=status.HTTP_201_CREATED)
-def create_plant_group(group: PlantGroupCreate, db: Session = Depends(get_db)) -> PlantGroup:
-    """Create one physical plant assigned to a plant type."""
-
+def create_plant_group(group: PlantGroupCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)) -> PlantGroup:
     plant_type = db.query(PlantType).filter(PlantType.plant_type_id == group.plant_type_id).first()
     if plant_type is None:
         raise HTTPException(status_code=400, detail="plant_type_id does not exist")
 
-    db_group = PlantGroup(**group.model_dump())
+    db_group = PlantGroup(**group.model_dump(), user_id=current_user["id"])
     db.add(db_group)
     try:
         db.commit()
