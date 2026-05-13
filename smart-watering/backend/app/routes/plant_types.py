@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import engine, get_db
 from app.models import PlantGroup, PlantType
 from app.schemas import PlantTypeCreate, PlantTypeResponse, PlantTypeSuggestion, PlantTypeUpdate
 
@@ -17,18 +18,54 @@ DUMMY_SUGGESTIONS: dict[str, tuple[float, float]] = {
 DEFAULT_SUGGESTION = (35, 55)
 
 
-@router.get("", response_model=list[PlantTypeResponse])
-def list_plant_types(db: Session = Depends(get_db)) -> list[PlantType]:
-    """List reusable plant categories."""
+def get_current_user(session_token: str | None = Cookie(None)):
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-    return db.query(PlantType).order_by(PlantType.id).all()
+    with engine.connect() as conn:
+        user = conn.execute(
+            text(
+                """
+                SELECT users.id, users.username FROM sessions
+                JOIN users ON sessions.user_id = users.id
+                WHERE sessions.session_token = :st
+                """
+            ),
+            {"st": session_token},
+        ).mappings().first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return user
+
+
+@router.get("", response_model=list[PlantTypeResponse])
+def list_plant_types(db: Session = Depends(get_db), current_user=Depends(get_current_user)) -> list[PlantType]:
+    """List reusable plant categories for the logged-in user."""
+
+    return db.query(PlantType).filter(PlantType.user_id == current_user["id"]).order_by(PlantType.id).all()
 
 
 @router.post("", response_model=PlantTypeResponse, status_code=status.HTTP_201_CREATED)
-def create_plant_type(plant_type: PlantTypeCreate, db: Session = Depends(get_db)) -> PlantType:
-    """Create a reusable plant category with moisture thresholds."""
+def create_plant_type(
+    plant_type: PlantTypeCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantType:
+    """Create a reusable plant category with moisture thresholds for the logged-in user."""
 
-    db_plant_type = PlantType(**plant_type.model_dump())
+    duplicate = (
+        db.query(PlantType)
+        .filter(
+            PlantType.user_id == current_user["id"],
+            (PlantType.plant_type_id == plant_type.plant_type_id) | (PlantType.name == plant_type.name),
+        )
+        .first()
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=400, detail="plant_type_id or name already exists")
+
+    db_plant_type = PlantType(**plant_type.model_dump(), user_id=current_user["id"])
     db.add(db_plant_type)
     try:
         db.commit()
@@ -41,12 +78,33 @@ def create_plant_type(plant_type: PlantTypeCreate, db: Session = Depends(get_db)
 
 
 @router.patch("/{plant_type_id}", response_model=PlantTypeResponse)
-def update_plant_type(plant_type_id: str, update: PlantTypeUpdate, db: Session = Depends(get_db)) -> PlantType:
-    """Update a reusable plant category's display name and moisture thresholds."""
+def update_plant_type(
+    plant_type_id: str,
+    update: PlantTypeUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantType:
+    """Update one of the logged-in user's reusable plant categories."""
 
-    db_plant_type = db.query(PlantType).filter(PlantType.plant_type_id == plant_type_id).first()
+    db_plant_type = (
+        db.query(PlantType)
+        .filter(PlantType.plant_type_id == plant_type_id, PlantType.user_id == current_user["id"])
+        .first()
+    )
     if db_plant_type is None:
         raise HTTPException(status_code=404, detail="plant type not found")
+
+    duplicate_name = (
+        db.query(PlantType)
+        .filter(
+            PlantType.user_id == current_user["id"],
+            PlantType.name == update.name,
+            PlantType.plant_type_id != plant_type_id,
+        )
+        .first()
+    )
+    if duplicate_name is not None:
+        raise HTTPException(status_code=400, detail="plant type name already exists")
 
     db_plant_type.name = update.name
     db_plant_type.ideal_moisture_min = update.ideal_moisture_min
@@ -63,14 +121,26 @@ def update_plant_type(plant_type_id: str, update: PlantTypeUpdate, db: Session =
 
 
 @router.delete("/{plant_type_id}", response_model=PlantTypeResponse)
-def delete_plant_type(plant_type_id: str, db: Session = Depends(get_db)) -> PlantType:
-    """Delete a plant type if no physical plants are using it."""
+def delete_plant_type(
+    plant_type_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantType:
+    """Delete one of the logged-in user's plant types if no physical plants are using it."""
 
-    db_plant_type = db.query(PlantType).filter(PlantType.plant_type_id == plant_type_id).first()
+    db_plant_type = (
+        db.query(PlantType)
+        .filter(PlantType.plant_type_id == plant_type_id, PlantType.user_id == current_user["id"])
+        .first()
+    )
     if db_plant_type is None:
         raise HTTPException(status_code=404, detail="plant type not found")
 
-    group_using_type = db.query(PlantGroup).filter(PlantGroup.plant_type_id == plant_type_id).first()
+    group_using_type = (
+        db.query(PlantGroup)
+        .filter(PlantGroup.plant_type_id == plant_type_id, PlantGroup.user_id == current_user["id"])
+        .first()
+    )
     if group_using_type is not None:
         raise HTTPException(status_code=400, detail="delete plants using this plant type first")
 

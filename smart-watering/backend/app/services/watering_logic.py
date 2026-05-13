@@ -44,7 +44,7 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
             reason="Assigned plant group not found in SQLite settings",
         )
 
-    plant_type = db.query(PlantType).filter(PlantType.plant_type_id == group.plant_type_id).first()
+    plant_type = db.query(PlantType).filter(PlantType.plant_type_id == group.plant_type_id, PlantType.user_id == group.user_id).first()
     if plant_type is None:
         return WateringDecision(
             device_id=device.device_id,

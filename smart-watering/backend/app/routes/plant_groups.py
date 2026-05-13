@@ -45,7 +45,11 @@ def list_plant_groups(db: Session = Depends(get_db), current_user=Depends(get_cu
 
 @router.post("", response_model=PlantGroupResponse, status_code=status.HTTP_201_CREATED)
 def create_plant_group(group: PlantGroupCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)) -> PlantGroup:
-    plant_type = db.query(PlantType).filter(PlantType.plant_type_id == group.plant_type_id).first()
+    plant_type = (
+        db.query(PlantType)
+        .filter(PlantType.plant_type_id == group.plant_type_id, PlantType.user_id == current_user["id"])
+        .first()
+    )
     if plant_type is None:
         raise HTTPException(status_code=400, detail="plant_type_id does not exist")
 
@@ -66,7 +70,7 @@ def get_plant_group(group_id: str, db: Session = Depends(get_db)) -> PlantGroupD
     """Get one physical plant with plant type and assigned devices."""
 
     group = _get_group_or_404(db, group_id)
-    plant_type = _get_plant_type_or_404(db, group.plant_type_id)
+    plant_type = _get_plant_type_or_404(db, group.plant_type_id, group.user_id)
     devices = db.query(Device).filter(Device.group_id == group.group_id).order_by(Device.id).all()
     return PlantGroupDetail(group=group, plant_type=plant_type, devices=devices)
 
@@ -157,8 +161,8 @@ def _get_group_or_404(db: Session, group_id: str) -> PlantGroup:
     return group
 
 
-def _get_plant_type_or_404(db: Session, plant_type_id: str) -> PlantType:
-    plant_type = db.query(PlantType).filter(PlantType.plant_type_id == plant_type_id).first()
+def _get_plant_type_or_404(db: Session, plant_type_id: str, user_id: int | None) -> PlantType:
+    plant_type = db.query(PlantType).filter(PlantType.plant_type_id == plant_type_id, PlantType.user_id == user_id).first()
     if plant_type is None:
         raise HTTPException(status_code=404, detail="plant type not found")
     return plant_type

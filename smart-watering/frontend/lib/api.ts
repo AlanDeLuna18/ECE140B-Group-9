@@ -5,11 +5,15 @@ export type Device = {
   device_id: string;
   name: string;
   group_id: string | null;
+  ip_address?: string | null;
+  firmware_version?: string | null;
+  last_seen_at?: string | null;
   created_at: string;
 };
 
 export type PlantType = {
   id: number;
+  user_id: number | null;
   plant_type_id: string;
   name: string;
   ideal_moisture_min: number;
@@ -59,9 +63,13 @@ export type WateringEventPoint = {
 export type DetectedDevice = {
   device_id: string;
   name: string;
+  is_online: boolean;
   in_use: boolean;
   group_id: string | null;
   group_name: string | null;
+  ip_address?: string | null;
+  firmware_version?: string | null;
+  last_seen_at?: string | null;
 };
 
 export type PumpResult = {

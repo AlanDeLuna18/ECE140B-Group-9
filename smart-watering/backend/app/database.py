@@ -32,8 +32,40 @@ def create_tables() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    ensure_auth_tables()
     ensure_device_columns()
+    ensure_plant_type_columns()
     ensure_plant_group_columns()
+
+
+def ensure_auth_tables() -> None:
+    """Create the simple dashboard auth tables used by the login routes."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username VARCHAR UNIQUE NOT NULL,
+                    password_hash VARCHAR NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    session_token VARCHAR UNIQUE NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+                """
+            )
+        )
 
 
 def ensure_device_columns() -> None:
@@ -44,11 +76,43 @@ def ensure_device_columns() -> None:
         return
 
     device_columns = {column["name"] for column in inspector.get_columns("devices")}
-    if "last_watered_at" in device_columns:
+    with engine.begin() as connection:
+        if "last_watered_at" not in device_columns:
+            connection.execute(text("ALTER TABLE devices ADD COLUMN last_watered_at DATETIME"))
+        if "ip_address" not in device_columns:
+            connection.execute(text("ALTER TABLE devices ADD COLUMN ip_address VARCHAR"))
+        if "firmware_version" not in device_columns:
+            connection.execute(text("ALTER TABLE devices ADD COLUMN firmware_version VARCHAR"))
+        if "last_seen_at" not in device_columns:
+            connection.execute(text("ALTER TABLE devices ADD COLUMN last_seen_at DATETIME"))
+
+
+def ensure_plant_type_columns() -> None:
+    """Add user ownership to plant types in the local SQLite database."""
+
+    inspector = inspect(engine)
+    if "plant_types" not in inspector.get_table_names():
         return
 
+    plant_type_columns = {column["name"] for column in inspector.get_columns("plant_types")}
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE devices ADD COLUMN last_watered_at DATETIME"))
+        if "user_id" not in plant_type_columns:
+            connection.execute(text("ALTER TABLE plant_types ADD COLUMN user_id INTEGER"))
+
+        # Older local databases had globally unique plant type ids/names.
+        # Plant types are now per user, so duplicates across users must be allowed.
+        indexes = {index["name"] for index in inspector.get_indexes("plant_types")}
+        if "ix_plant_types_plant_type_id" in indexes:
+            connection.execute(text("DROP INDEX ix_plant_types_plant_type_id"))
+        if "ix_plant_types_name" in indexes:
+            connection.execute(text("DROP INDEX ix_plant_types_name"))
+
+        first_user_id = connection.execute(text("SELECT id FROM users ORDER BY id LIMIT 1")).scalar()
+        if first_user_id is not None:
+            connection.execute(
+                text("UPDATE plant_types SET user_id = :user_id WHERE user_id IS NULL"),
+                {"user_id": first_user_id},
+            )
 
 
 def ensure_plant_group_columns() -> None:

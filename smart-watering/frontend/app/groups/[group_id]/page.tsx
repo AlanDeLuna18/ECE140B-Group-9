@@ -17,6 +17,8 @@ import { useCallback, useEffect, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 const COOLDOWN_SECONDS = 30;
+const AUTO_REFRESH_INTERVAL_MS = 2000;
+const DEVICE_ONLINE_WINDOW_SECONDS = 20;
 const DEVICE_LINE_COLORS = ["#2f7d59", "#2563eb", "#9333ea", "#dc2626", "#0f766e", "#b45309"];
 const GAUGE_PATH_LENGTH = 126;
 
@@ -50,6 +52,15 @@ function getCooldownRemainingSeconds(lastWateredAt: string | null, now: number) 
   return Math.max(0, COOLDOWN_SECONDS - elapsedSeconds);
 }
 
+function isDeviceOnline(lastSeenAt: string | null | undefined, now: number) {
+  if (!lastSeenAt) {
+    return false;
+  }
+
+  const elapsedSeconds = Math.floor((now - parseTimestamp(lastSeenAt).getTime()) / 1000);
+  return elapsedSeconds <= DEVICE_ONLINE_WINDOW_SECONDS;
+}
+
 function getMoistureStatus(moisture: number, idealMin: number, idealMax: number) {
   if (moisture < idealMin) {
     return { label: "Low", className: "text-red-700", gaugeColor: "#dc2626" };
@@ -75,7 +86,7 @@ export default function GroupDetailPage() {
   const [wateringEventPage, setWateringEventPage] = useState(1);
   const [now, setNow] = useState(Date.now());
 
-  const loadGroup = useCallback(async () => {
+  const loadGroup = useCallback(async (showSyncedStatus = true) => {
     setError(null);
     try {
       const [groupData, detectedData, historyData, eventData] = await Promise.all([
@@ -88,7 +99,9 @@ export default function GroupDetailPage() {
       setDetectedDevices(detectedData);
       setSensorHistory(historyData);
       setWateringEvents(eventData);
-      setStatus("Plant synced with FastAPI");
+      if (showSyncedStatus) {
+        setStatus("Plant synced with FastAPI");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load plant");
       setStatus("Backend connection failed");
@@ -97,6 +110,14 @@ export default function GroupDetailPage() {
 
   useEffect(() => {
     loadGroup();
+  }, [loadGroup]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      loadGroup(false);
+    }, AUTO_REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
   }, [loadGroup]);
 
   useEffect(() => {
@@ -212,8 +233,9 @@ export default function GroupDetailPage() {
   const visibleWateringEvents = sortedWateringEvents.slice(firstWateringEventIndex, firstWateringEventIndex + eventsPerPage);
   const cooldownRemaining = detail ? getCooldownRemainingSeconds(detail.group.last_watered_at, now) : 0;
   const isInCooldown = cooldownRemaining > 0;
+  const addableDetectedDevices = detectedDevices.filter((device) => device.is_online && !device.group_id);
   const selectedDevice = detectedDevices.find((device) => device.device_id === selectedDeviceId);
-  const selectedDeviceUnavailable = Boolean(selectedDevice?.group_id && selectedDevice.group_id !== groupId);
+  const selectedDeviceUnavailable = !selectedDevice || !selectedDevice.is_online || Boolean(selectedDevice.group_id);
   const latestMoisturePoint = sensorHistory
     .filter((point) => point.moisture !== null)
     .reduce<SensorHistoryPoint | null>((latest, point) => {
@@ -235,7 +257,7 @@ export default function GroupDetailPage() {
     return (
       <main className="min-h-screen px-8 py-8 sm:px-10 lg:px-16 xl:px-20">
         <section className="mx-auto max-w-7xl">
-          <Link className="text-sm font-semibold text-leaf" href="/">
+          <Link className="text-sm font-semibold text-leaf" href="/dashboard">
             Back to Dashboard
           </Link>
           <p className="mt-6 text-slate-700">{status}</p>
@@ -248,7 +270,7 @@ export default function GroupDetailPage() {
   return (
     <main className="min-h-screen px-8 py-8 sm:px-10 lg:px-16 xl:px-20">
       <section className="mx-auto max-w-7xl">
-        <Link className="text-sm font-semibold text-leaf" href="/">
+        <Link className="text-sm font-semibold text-leaf" href="/dashboard">
           Back to Dashboard
         </Link>
 
@@ -342,10 +364,9 @@ export default function GroupDetailPage() {
                 Detected ESP32 Device
                 <select className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal" onChange={(event) => setSelectedDeviceId(event.target.value)} value={selectedDeviceId}>
                   <option value="">Select Detected ESP32</option>
-                  {detectedDevices.map((device) => (
-                    <option disabled={Boolean(device.group_id && device.group_id !== groupId)} key={device.device_id} value={device.device_id}>
-                      {device.name} · {device.device_id}
-                      {device.group_id === groupId ? " · In this plant" : device.group_id ? ` · In use by ${device.group_name ?? device.group_id}` : " · Available"}
+                  {addableDetectedDevices.map((device) => (
+                    <option key={device.device_id} value={device.device_id}>
+                      {device.name} · {device.device_id} · Online · Available
                     </option>
                   ))}
                 </select>
@@ -358,22 +379,31 @@ export default function GroupDetailPage() {
               >
                 Add Device to Plant
               </button>
-              <p className="text-xs text-slate-500">Devices already used by another plant are marked in use and cannot be selected.</p>
             </div>
 
             <div className="mt-5 grid gap-3">
               {detail.devices.length ? (
-                detail.devices.map((device) => (
-                  <div className="flex flex-col gap-3 rounded-md border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between" key={device.id}>
-                    <div>
-                      <p className="font-medium text-ink">{device.name}</p>
-                      <p className="text-sm text-slate-500">{device.device_id}</p>
+                detail.devices.map((device) => {
+                  const online = isDeviceOnline(device.last_seen_at, now);
+
+                  return (
+                    <div className="flex flex-col gap-3 rounded-md border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between" key={device.id}>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-ink">{device.name}</p>
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                            {online ? "Online" : "Offline"}
+                          </span>
+                        </div>
+                        <p className="text-sm text-slate-500">{device.device_id}</p>
+                        <p className="text-xs text-slate-500">Last seen: {formatDate(device.last_seen_at ?? null)}</p>
+                      </div>
+                      <button className="rounded-md border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50" onClick={() => handleRemoveDevice(device.device_id)} type="button">
+                        Remove Device
+                      </button>
                     </div>
-                    <button className="rounded-md border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50" onClick={() => handleRemoveDevice(device.device_id)} type="button">
-                      Remove Device
-                    </button>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <p className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">No devices assigned yet.</p>
               )}

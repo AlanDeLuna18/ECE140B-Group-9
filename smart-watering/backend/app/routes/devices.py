@@ -1,12 +1,16 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Device, PlantGroup
-from app.schemas import DetectedDevice, DeviceCreate, DeviceResponse
+from app.schemas import DetectedDevice, DeviceCreate, DeviceHeartbeat, DeviceResponse
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+DEVICE_DISCOVERY_WINDOW_SECONDS = 20
 
 
 @router.get("", response_model=list[DeviceResponse])
@@ -18,28 +22,53 @@ def list_devices(db: Session = Depends(get_db)) -> list[Device]:
 
 @router.get("/detected", response_model=list[DetectedDevice])
 def list_detected_devices(db: Session = Depends(get_db)) -> list[DetectedDevice]:
-    """Return dummy detected ESP32 devices with assignment status."""
+    """Return ESP32 devices currently online and available for assignment checks."""
 
-    configured_devices = {device.device_id: device for device in db.query(Device).order_by(Device.id).all()}
     groups = {group.group_id: group.name for group in db.query(PlantGroup).all()}
-    detected_device_ids = [f"device-{index:03d}" for index in range(1, 25)]
+    cutoff = datetime.utcnow() - timedelta(seconds=DEVICE_DISCOVERY_WINDOW_SECONDS)
+    devices = (
+        db.query(Device)
+        .filter(Device.last_seen_at.is_not(None), Device.last_seen_at >= cutoff)
+        .order_by(Device.name)
+        .all()
+    )
 
     detected_devices: list[DetectedDevice] = []
-    for device_id in detected_device_ids:
-        configured_device = configured_devices.get(device_id)
-        group_id = configured_device.group_id if configured_device else None
-        configured_name = configured_device.name if configured_device else None
+    for device in devices:
         detected_devices.append(
             DetectedDevice(
-                device_id=device_id,
-                name=configured_name if configured_name and configured_name != device_id else _detected_device_name(device_id),
-                in_use=group_id is not None,
-                group_id=group_id,
-                group_name=groups.get(group_id) if group_id else None,
+                device_id=device.device_id,
+                name=device.name,
+                is_online=True,
+                in_use=device.group_id is not None,
+                group_id=device.group_id,
+                group_name=groups.get(device.group_id) if device.group_id else None,
+                ip_address=device.ip_address,
+                firmware_version=device.firmware_version,
+                last_seen_at=device.last_seen_at,
             )
         )
 
     return detected_devices
+
+
+@router.post("/heartbeat", response_model=DeviceResponse)
+def receive_device_heartbeat(heartbeat: DeviceHeartbeat, db: Session = Depends(get_db)) -> Device:
+    """Register that an ESP32 is online and available for assignment."""
+
+    device = db.query(Device).filter(Device.device_id == heartbeat.device_id).first()
+    if device is None:
+        device = Device(device_id=heartbeat.device_id, name=heartbeat.name)
+        db.add(device)
+
+    device.name = heartbeat.name
+    device.ip_address = heartbeat.ip_address
+    device.firmware_version = heartbeat.firmware_version
+    device.last_seen_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(device)
+    return device
 
 
 @router.post("", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)

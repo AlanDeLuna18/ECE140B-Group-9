@@ -47,6 +47,7 @@ class PlantTypeResponse(PlantTypeCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    user_id: int | None = None
     created_at: datetime
 
 
@@ -82,15 +83,29 @@ class DeviceResponse(DeviceCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    ip_address: str | None = None
+    firmware_version: str | None = None
+    last_seen_at: datetime | None = None
     created_at: datetime
+
+
+class DeviceHeartbeat(BaseModel):
+    device_id: str = Field(..., examples=["device-001"])
+    name: str = Field(..., examples=["ESP32 Unit 001"])
+    ip_address: str | None = Field(default=None, examples=["192.168.1.42"])
+    firmware_version: str | None = Field(default=None, examples=["0.1.0"])
 
 
 class DetectedDevice(BaseModel):
     device_id: str
     name: str
+    is_online: bool = True
     in_use: bool = False
     group_id: str | None = None
     group_name: str | None = None
+    ip_address: str | None = None
+    firmware_version: str | None = None
+    last_seen_at: datetime | None = None
 
 
 class AutoModeUpdate(BaseModel):

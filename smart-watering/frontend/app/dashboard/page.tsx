@@ -9,6 +9,8 @@ import type { Device, PlantGroup, PlantType, PumpResult, SensorHistoryPoint } fr
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const AUTO_REFRESH_INTERVAL_MS = 2000;
+
 export default function DashboardPage() {
   const router = useRouter();
   const [devices, setDevices] = useState<Device[]>([]);
@@ -20,7 +22,7 @@ export default function DashboardPage() {
   const [showPlantTypeForm, setShowPlantTypeForm] = useState(false);
   const [showPlantForm, setShowPlantForm] = useState(false);
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (showSyncedStatus = true) => {
     setError(null);
     try {
       const [deviceData, plantTypeData, plantGroupData] = await Promise.all([
@@ -41,7 +43,9 @@ export default function DashboardPage() {
         })
       );
       setSensorHistoryByGroup(Object.fromEntries(historyEntries));
-      setStatus("Dashboard synced with FastAPI");
+      if (showSyncedStatus) {
+        setStatus("Dashboard synced with FastAPI");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load dashboard data");
       setStatus("Backend connection failed");
@@ -50,6 +54,14 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadDashboard();
+  }, [loadDashboard]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      loadDashboard(false);
+    }, AUTO_REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
   }, [loadDashboard]);
 
   async function handleLogout() {
