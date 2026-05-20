@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Cookie, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import engine, get_db
+from app.auth import get_current_user
+from app.database import get_db
 from app.models import PlantGroup, PlantType
 from app.schemas import PlantTypeCreate, PlantTypeResponse, PlantTypeSuggestion, PlantTypeUpdate
 
@@ -16,27 +16,6 @@ DUMMY_SUGGESTIONS: dict[str, tuple[float, float]] = {
     "orchid": (40, 60),
 }
 DEFAULT_SUGGESTION = (35, 55)
-
-
-def get_current_user(session_token: str | None = Cookie(None)):
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    with engine.connect() as conn:
-        user = conn.execute(
-            text(
-                """
-                SELECT users.id, users.username FROM sessions
-                JOIN users ON sessions.user_id = users.id
-                WHERE sessions.session_token = :st
-                """
-            ),
-            {"st": session_token},
-        ).mappings().first()
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    return user
 
 
 @router.get("", response_model=list[PlantTypeResponse])

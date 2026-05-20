@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Cookie
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 
-from app.database import get_db, engine
+from app.auth import get_current_user
+from app.database import get_db
 from app.influx_client import influx_sensor_client
 from app.models import Device, PlantGroup, PlantType
 from app.schemas import (
@@ -17,25 +17,6 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api/plant-groups", tags=["plant groups"])
-
-
-def get_current_user(session_token: str | None = Cookie(None)):
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    with engine.connect() as conn:
-        user = conn.execute(
-            text("""
-                SELECT users.id, users.username FROM sessions 
-                JOIN users ON sessions.user_id = users.id 
-                WHERE sessions.session_token = :st
-            """),
-            {"st": session_token}
-        ).mappings().first()
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    return user
 
 
 @router.get("", response_model=list[PlantGroupResponse])
@@ -66,20 +47,28 @@ def create_plant_group(group: PlantGroupCreate, db: Session = Depends(get_db), c
 
 
 @router.get("/{group_id}", response_model=PlantGroupDetail)
-def get_plant_group(group_id: str, db: Session = Depends(get_db)) -> PlantGroupDetail:
+def get_plant_group(
+    group_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantGroupDetail:
     """Get one physical plant with plant type and assigned devices."""
 
-    group = _get_group_or_404(db, group_id)
+    group = _get_group_or_404(db, group_id, current_user["id"])
     plant_type = _get_plant_type_or_404(db, group.plant_type_id, group.user_id)
     devices = db.query(Device).filter(Device.group_id == group.group_id).order_by(Device.id).all()
     return PlantGroupDetail(group=group, plant_type=plant_type, devices=devices)
 
 
 @router.delete("/{group_id}", response_model=PlantGroupResponse)
-def delete_plant_group(group_id: str, db: Session = Depends(get_db)) -> PlantGroupResponse:
+def delete_plant_group(
+    group_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantGroupResponse:
     """Delete one physical plant and unassign its devices."""
 
-    group = _get_group_or_404(db, group_id)
+    group = _get_group_or_404(db, group_id, current_user["id"])
     response = PlantGroupResponse.model_validate(group)
 
     devices = db.query(Device).filter(Device.group_id == group.group_id).all()
@@ -92,10 +81,15 @@ def delete_plant_group(group_id: str, db: Session = Depends(get_db)) -> PlantGro
 
 
 @router.post("/{group_id}/devices/{device_id}", response_model=DeviceResponse)
-def assign_device_to_group(group_id: str, device_id: str, db: Session = Depends(get_db)) -> Device:
+def assign_device_to_group(
+    group_id: str,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> Device:
     """Assign an existing or detected ESP32 device to a physical plant group."""
 
-    _get_group_or_404(db, group_id)
+    _get_group_or_404(db, group_id, current_user["id"])
     device = db.query(Device).filter(Device.device_id == device_id).first()
     if device is None:
         device = Device(device_id=device_id, name=_detected_device_name(device_id), group_id=group_id)
@@ -117,9 +111,15 @@ def assign_device_to_group(group_id: str, device_id: str, db: Session = Depends(
 
 
 @router.delete("/{group_id}/devices/{device_id}", response_model=DeviceResponse)
-def remove_device_from_group(group_id: str, device_id: str, db: Session = Depends(get_db)) -> Device:
+def remove_device_from_group(
+    group_id: str,
+    device_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> Device:
     """Unassign a device from a physical plant group."""
 
+    _get_group_or_404(db, group_id, current_user["id"])
     device = db.query(Device).filter(Device.device_id == device_id, Device.group_id == group_id).first()
     if device is None:
         raise HTTPException(status_code=404, detail="device not found in this plant group")
@@ -131,10 +131,15 @@ def remove_device_from_group(group_id: str, device_id: str, db: Session = Depend
 
 
 @router.patch("/{group_id}/auto-mode", response_model=PlantGroupResponse)
-def update_auto_mode(group_id: str, update: AutoModeUpdate, db: Session = Depends(get_db)) -> PlantGroup:
+def update_auto_mode(
+    group_id: str,
+    update: AutoModeUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> PlantGroup:
     """Enable or disable automatic watering for a physical plant group."""
 
-    group = _get_group_or_404(db, group_id)
+    group = _get_group_or_404(db, group_id, current_user["id"])
     group.auto_mode = update.auto_mode
     db.commit()
     db.refresh(group)
@@ -142,23 +147,35 @@ def update_auto_mode(group_id: str, update: AutoModeUpdate, db: Session = Depend
 
 
 @router.get("/{group_id}/sensor-history", response_model=list[SensorHistoryPoint])
-def get_sensor_history(group_id: str, db: Session = Depends(get_db)) -> list[dict[str, str | float | None]]:
+def get_sensor_history(
+    group_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> list[dict[str, str | float | None]]:
     """Return recent moisture readings for all devices in a physical plant group."""
 
-    _get_group_or_404(db, group_id)
+    _get_group_or_404(db, group_id, current_user["id"])
     return influx_sensor_client.query_sensor_history(group_id)
 
 
 @router.get("/{group_id}/watering-events", response_model=list[WateringEventPoint])
-def get_watering_events(group_id: str, db: Session = Depends(get_db)) -> list[dict[str, str | float | None]]:
+def get_watering_events(
+    group_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> list[dict[str, str | float | None]]:
     """Return recent watering events for a physical plant group."""
 
-    _get_group_or_404(db, group_id)
+    _get_group_or_404(db, group_id, current_user["id"])
     return influx_sensor_client.query_watering_events(group_id)
 
 
-def _get_group_or_404(db: Session, group_id: str) -> PlantGroup:
-    group = db.query(PlantGroup).filter(PlantGroup.group_id == group_id).first()
+def _get_group_or_404(db: Session, group_id: str, user_id: int | None = None) -> PlantGroup:
+    query = db.query(PlantGroup).filter(PlantGroup.group_id == group_id)
+    if user_id is not None:
+        query = query.filter(PlantGroup.user_id == user_id)
+
+    group = query.first()
     if group is None:
         raise HTTPException(status_code=404, detail="plant group not found")
     return group

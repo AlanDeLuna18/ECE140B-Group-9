@@ -1,2 +1,7 @@
 testing/
 frontend/node_modules/
+smart-watering/frontend/node_modules/
+smart-watering/frontend/.next/
+smart-watering/backend/data/*.db-journal
+smart-watering/backend/data/*.db-shm
+smart-watering/backend/data/*.db-wal

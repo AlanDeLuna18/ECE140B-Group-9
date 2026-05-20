@@ -1,11 +1,12 @@
 import os
 import uuid
 import bcrypt
-from fastapi import FastAPI, Cookie, Depends, Form, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from pydantic import BaseModel
 
+from app.auth import get_current_user
 # Imports from HER project structure
 from app.database import create_tables, engine
 from app.routes.devices import router as devices_router
@@ -38,25 +39,6 @@ class PlantCreate(BaseModel):
 
 class PasswordUpdate(BaseModel):
     new_password: str
-
-# --- AUTH DEPENDENCY ---
-def get_current_user(session_token: str | None = Cookie(None)):
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    with engine.connect() as conn:
-        user = conn.execute(
-            text("""
-                SELECT users.id, users.username FROM sessions 
-                JOIN users ON sessions.user_id = users.id 
-                WHERE sessions.session_token = :st
-            """),
-            {"st": session_token}
-        ).mappings().first()
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    return user
 
 # --- AUTH ROUTES ---
 

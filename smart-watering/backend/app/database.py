@@ -128,3 +128,12 @@ def ensure_plant_group_columns() -> None:
             connection.execute(text("ALTER TABLE plant_groups ADD COLUMN auto_mode BOOLEAN DEFAULT 1 NOT NULL"))
         if "last_watered_at" not in group_columns:
             connection.execute(text("ALTER TABLE plant_groups ADD COLUMN last_watered_at DATETIME"))
+        if "user_id" not in group_columns:
+            connection.execute(text("ALTER TABLE plant_groups ADD COLUMN user_id INTEGER"))
+
+        first_user_id = connection.execute(text("SELECT id FROM users ORDER BY id LIMIT 1")).scalar()
+        if first_user_id is not None:
+            connection.execute(
+                text("UPDATE plant_groups SET user_id = :user_id WHERE user_id IS NULL"),
+                {"user_id": first_user_id},
+            )

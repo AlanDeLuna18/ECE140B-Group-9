@@ -117,61 +117,69 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
     )
 
 
-def manual_water(device_id: str, db: Session, duration_seconds: int = DEFAULT_WATERING_SECONDS) -> dict[str, str | int]:
+def manual_water(
+    device_id: str,
+    db: Session,
+    duration_seconds: int = DEFAULT_WATERING_SECONDS,
+    user_id: int | None = None,
+) -> dict[str, str | int]:
     """Queue watering manually for a device and update persistence."""
 
     device = db.query(Device).filter(Device.device_id == device_id).first()
-    group_id = "unknown"
-    if device is not None:
-        group_id = device.group_id or "unknown"
-        group = db.query(PlantGroup).filter(PlantGroup.group_id == device.group_id).first()
-        if group is not None:
-            if _is_group_in_cooldown(group):
-                return {
-                    "device_id": device_id,
-                    "group_id": group_id,
-                    "action": "none",
-                    "source": "manual",
-                    "duration_seconds": 0,
-                    "status": "cooldown",
-                }
-            _queue_water_command(
-                db=db,
-                device_id=device.device_id,
-                group_id=group.group_id,
-                source="manual",
-                duration_seconds=duration_seconds,
-            )
-            _mark_group_watered(db, group)
-            db.commit()
-        else:
-            _queue_water_command(
-                db=db,
-                device_id=device.device_id,
-                group_id=device.group_id,
-                source="manual",
-                duration_seconds=duration_seconds,
-            )
-            db.commit()
-    else:
-        _queue_water_command(
-            db=db,
-            device_id=device_id,
-            group_id=None,
-            source="manual",
-            duration_seconds=duration_seconds,
-        )
-        db.commit()
+    if device is None:
+        return {
+            "device_id": device_id,
+            "group_id": None,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "device_not_found",
+        }
+
+    group_query = db.query(PlantGroup).filter(PlantGroup.group_id == device.group_id) if device.group_id else None
+    if group_query is not None and user_id is not None:
+        group_query = group_query.filter(PlantGroup.user_id == user_id)
+
+    group = group_query.first() if group_query is not None else None
+    if group is None:
+        return {
+            "device_id": device_id,
+            "group_id": device.group_id,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "no_group",
+        }
+
+    if _is_group_in_cooldown(group):
+        return {
+            "device_id": device_id,
+            "group_id": group.group_id,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "cooldown",
+        }
+
+    _queue_water_command(
+        db=db,
+        device_id=device.device_id,
+        group_id=group.group_id,
+        source="manual",
+        duration_seconds=duration_seconds,
+    )
+    _mark_group_watered(db, group)
+    db.commit()
 
     influx_sensor_client.write_watering_event(
-        group_id=group_id,
+        group_id=group.group_id,
         source="manual",
         duration_seconds=duration_seconds,
         device_id=device_id,
     )
     return {
         "device_id": device_id,
-        "group_id": group_id,
+        "group_id": group.group_id,
         "action": "water",
         "source": "manual",
         "duration_seconds": duration_seconds,
@@ -179,55 +187,72 @@ def manual_water(device_id: str, db: Session, duration_seconds: int = DEFAULT_WA
     }
 
 
-def manual_water_group(group_id: str, db: Session, duration_seconds: int = DEFAULT_WATERING_SECONDS) -> dict[str, str | int]:
+def manual_water_group(
+    group_id: str,
+    db: Session,
+    duration_seconds: int = DEFAULT_WATERING_SECONDS,
+    user_id: int | None = None,
+) -> dict[str, str | int]:
     """Queue watering manually for the ESP32 assigned to a physical plant group."""
 
-    group = db.query(PlantGroup).filter(PlantGroup.group_id == group_id).first()
-    if group is not None:
-        if _is_group_in_cooldown(group):
-            return {
-                "group_id": group_id,
-                "action": "none",
-                "source": "manual",
-                "duration_seconds": 0,
-                "status": "cooldown",
-            }
+    group_query = db.query(PlantGroup).filter(PlantGroup.group_id == group_id)
+    if user_id is not None:
+        group_query = group_query.filter(PlantGroup.user_id == user_id)
 
-        device = db.query(Device).filter(Device.group_id == group.group_id).order_by(Device.id).first()
-        if device is None:
-            return {
-                "group_id": group_id,
-                "device_id": None,
-                "action": "none",
-                "source": "manual",
-                "duration_seconds": 0,
-                "status": "no_device",
-            }
+    group = group_query.first()
+    if group is None:
+        return {
+            "group_id": group_id,
+            "device_id": None,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "group_not_found",
+        }
 
-        _queue_water_command(
-            db=db,
-            device_id=device.device_id,
-            group_id=group.group_id,
-            source="manual",
-            duration_seconds=duration_seconds,
-        )
-        _mark_group_watered(db, group)
-        db.commit()
-    else:
-        device = None
+    if _is_group_in_cooldown(group):
+        return {
+            "group_id": group_id,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "cooldown",
+        }
+
+    device = db.query(Device).filter(Device.group_id == group.group_id).order_by(Device.id).first()
+    if device is None:
+        return {
+            "group_id": group_id,
+            "device_id": None,
+            "action": "none",
+            "source": "manual",
+            "duration_seconds": 0,
+            "status": "no_device",
+        }
+
+    _queue_water_command(
+        db=db,
+        device_id=device.device_id,
+        group_id=group.group_id,
+        source="manual",
+        duration_seconds=duration_seconds,
+    )
+    _mark_group_watered(db, group)
+    db.commit()
 
     influx_sensor_client.write_watering_event(
         group_id=group_id,
         source="manual",
         duration_seconds=duration_seconds,
+        device_id=device.device_id,
     )
     return {
         "group_id": group_id,
-        "device_id": device.device_id if device is not None else None,
-        "action": "water" if device is not None else "none",
+        "device_id": device.device_id,
+        "action": "water",
         "source": "manual",
-        "duration_seconds": duration_seconds if device is not None else 0,
-        "status": "queued" if device is not None else "group_not_found",
+        "duration_seconds": duration_seconds,
+        "status": "queued",
     }
 
 

@@ -1,3 +1,5 @@
+import json
+
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
@@ -28,11 +30,14 @@ class InfluxSensorClient:
             .field("temperature", data.temperature)
         )
 
-        self.write_api.write(
-            bucket=settings.influx_bucket,
-            org=settings.influx_org,
-            record=point,
-        )
+        try:
+            self.write_api.write(
+                bucket=settings.influx_bucket,
+                org=settings.influx_org,
+                record=point,
+            )
+        except Exception as exc:
+            print(f"[InfluxDB] Failed to write sensor data: {exc}")
 
     def write_watering_event(
         self,
@@ -54,18 +59,23 @@ class InfluxSensorClient:
         if moisture is not None:
             point = point.field("moisture", moisture)
 
-        self.write_api.write(
-            bucket=settings.influx_bucket,
-            org=settings.influx_org,
-            record=point,
-        )
+        try:
+            self.write_api.write(
+                bucket=settings.influx_bucket,
+                org=settings.influx_org,
+                record=point,
+            )
+        except Exception as exc:
+            print(f"[InfluxDB] Failed to write watering event: {exc}")
 
     def query_sensor_history(self, group_id: str) -> list[dict[str, str | float | None]]:
+        bucket = _flux_string(settings.influx_bucket)
+        group = _flux_string(group_id)
         query = f'''
-from(bucket: "{settings.influx_bucket}")
+from(bucket: {bucket})
   |> range(start: -24h)
   |> filter(fn: (r) => r._measurement == "plant_sensor")
-  |> filter(fn: (r) => r.group_id == "{group_id}")
+  |> filter(fn: (r) => r.group_id == {group})
   |> filter(fn: (r) => r._field == "moisture" or r._field == "temperature")
   |> pivot(rowKey:["_time", "device_id"], columnKey: ["_field"], valueColumn: "_value")
   |> keep(columns: ["_time", "device_id", "moisture", "temperature"])
@@ -74,11 +84,13 @@ from(bucket: "{settings.influx_bucket}")
         return self._query_records(query, include_group_id=False)
 
     def query_watering_events(self, group_id: str) -> list[dict[str, str | float | None]]:
+        bucket = _flux_string(settings.influx_bucket)
+        group = _flux_string(group_id)
         query = f'''
-from(bucket: "{settings.influx_bucket}")
+from(bucket: {bucket})
   |> range(start: -24h)
   |> filter(fn: (r) => r._measurement == "watering_event")
-  |> filter(fn: (r) => r.group_id == "{group_id}")
+  |> filter(fn: (r) => r.group_id == {group})
   |> filter(fn: (r) => r._field == "duration_seconds" or r._field == "moisture")
   |> pivot(rowKey:["_time", "group_id", "source"], columnKey: ["_field"], valueColumn: "_value")
   |> keep(columns: ["_time", "group_id", "source", "duration_seconds", "moisture"])
@@ -87,7 +99,12 @@ from(bucket: "{settings.influx_bucket}")
         return self._query_records(query, include_group_id=True)
 
     def _query_records(self, query: str, include_group_id: bool) -> list[dict[str, str | float | None]]:
-        tables = self.query_api.query(query=query, org=settings.influx_org)
+        try:
+            tables = self.query_api.query(query=query, org=settings.influx_org)
+        except Exception as exc:
+            print(f"[InfluxDB] Failed to query records: {exc}")
+            return []
+
         records: list[dict[str, str | float | None]] = []
         for table in tables:
             for record in table.records:
@@ -107,6 +124,10 @@ from(bucket: "{settings.influx_bucket}")
                     }
                 records.append(item)
         return records
+
+
+def _flux_string(value: str) -> str:
+    return json.dumps(value)
 
 
 influx_sensor_client = InfluxSensorClient()
