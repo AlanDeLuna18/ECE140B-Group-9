@@ -1,5 +1,37 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+export async function getApiErrorMessage(response: Response, fallback: string) {
+  const errorText = await response.text();
+  if (!errorText) {
+    return fallback;
+  }
+
+  try {
+    const errorData = JSON.parse(errorText) as { detail?: unknown; message?: unknown };
+    const message = errorData.detail ?? errorData.message;
+    if (typeof message === "string") {
+      return message;
+    }
+    if (Array.isArray(message)) {
+      return message
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "msg" in item && typeof item.msg === "string") {
+            return item.msg;
+          }
+          return JSON.stringify(item);
+        })
+        .join(", ");
+    }
+  } catch {
+    return errorText;
+  }
+
+  return fallback;
+}
+
 export type Device = {
   id: number;
   device_id: string;
@@ -118,8 +150,7 @@ async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(errorText || `Request failed with status ${response.status}`);
+    throw new Error(await getApiErrorMessage(response, `Request failed with status ${response.status}`));
   }
 
   return response.json() as Promise<T>;

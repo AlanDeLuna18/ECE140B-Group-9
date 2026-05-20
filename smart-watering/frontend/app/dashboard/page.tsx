@@ -98,7 +98,7 @@ export default function DashboardPage() {
             <p className="text-sm font-medium uppercase tracking-wide text-leaf">Smart Watering</p>
             <h1 className="mt-2 text-3xl font-bold text-ink sm:text-4xl">Dashboard</h1>
             <p className="mt-3 max-w-2xl text-slate-600">
-              Manage watering actions for all plant from one place.
+              Manage watering actions for all plants from one place.
             </p>
           </div>
           <div className="flex items-center gap-3">

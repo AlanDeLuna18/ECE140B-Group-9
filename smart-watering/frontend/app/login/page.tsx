@@ -1,12 +1,16 @@
 "use client";
 
+import { getApiErrorMessage } from "@/lib/api";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [mode, setMode] = useState<"login" | "register">("login");
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>, endpoint: string) {
     e.preventDefault();
@@ -20,7 +24,7 @@ export default function LoginPage() {
     });
 
     try {
-      const res = await fetch(`http://localhost:8000/${endpoint}`, {
+      const res = await fetch(`${API_BASE_URL}/${endpoint.replace(/^\/+/, "")}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -32,11 +36,10 @@ export default function LoginPage() {
       if (res.ok) {
         router.push("/dashboard");
       } else {
-        const errorData = await res.json().catch(() => ({}));
-        const message = errorData.detail || (endpoint.includes("register")
+        const fallback = endpoint.includes("register")
           ? "Registration failed — username may already exist"
-          : "Invalid username or password");
-        setError(typeof message === "string" ? message : JSON.stringify(message));
+          : "Invalid username or password";
+        setError(await getApiErrorMessage(res, fallback));
       }
     } catch (err) {
       setError("Unable to connect to the server. Please check if the backend is running.");
@@ -59,58 +62,80 @@ export default function LoginPage() {
           </div>
         )}
 
-        <div className="mt-8 flex flex-col gap-10 md:flex-row">
-          <div className="flex-1 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-            <h2 className="text-xl font-semibold text-slate-900">Register</h2>
-            <form className="mt-4 flex flex-col gap-3" onSubmit={(e) => handleSubmit(e, "api/register")}>
-              <input
-                className="rounded border border-slate-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-green-500"
-                name="username"
-                placeholder="Username"
-                required
-              />
-              <input
-                className="rounded border border-slate-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-green-500"
-                name="password"
-                placeholder="Password"
-                required
-                type="password"
-              />
+        <div className="mx-auto mt-12 w-full max-w-lg rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
+          {mode === "login" ? (
+            <>
+              <h2 className="text-2xl font-semibold text-slate-900">Login</h2>
+              <form className="mt-6 flex flex-col gap-4" onSubmit={(e) => handleSubmit(e, "login")}>
+                <input
+                  className="rounded border border-slate-300 px-4 py-3 text-base text-black focus:outline-none focus:ring-2 focus:ring-green-500"
+                  name="username"
+                  placeholder="Username"
+                  required
+                />
+                <input
+                  className="rounded border border-slate-300 px-4 py-3 text-base text-black focus:outline-none focus:ring-2 focus:ring-green-500"
+                  name="password"
+                  placeholder="Password"
+                  required
+                  type="password"
+                />
+                <button
+                  disabled={isLoading}
+                  className="rounded bg-green-600 px-4 py-3 text-base font-medium text-white transition-colors hover:bg-green-700 disabled:bg-slate-400"
+                  type="submit"
+                >
+                  {isLoading ? "Logging in..." : "Login"}
+                </button>
+              </form>
               <button
-                disabled={isLoading}
-                className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:bg-slate-400 transition-colors"
-                type="submit"
+                className="mt-4 w-full rounded border border-green-200 bg-white px-4 py-3 text-base font-medium text-green-700 transition-colors hover:bg-green-50"
+                onClick={() => {
+                  setError(null);
+                  setMode("register");
+                }}
+                type="button"
               >
-                {isLoading ? "Registering..." : "Register"}
+                Register
               </button>
-            </form>
-          </div>
-
-          <div className="flex-1 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-            <h2 className="text-xl font-semibold text-slate-900">Login</h2>
-            <form className="mt-4 flex flex-col gap-3" onSubmit={(e) => handleSubmit(e, "login")}>
-              <input
-                className="rounded border border-slate-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-green-500"
-                name="username"
-                placeholder="Username"
-                required
-              />
-              <input
-                className="rounded border border-slate-300 px-3 py-2 text-sm text-black focus:outline-none focus:ring-2 focus:ring-green-500"
-                name="password"
-                placeholder="Password"
-                required
-                type="password"
-              />
+            </>
+          ) : (
+            <>
+              <h2 className="text-2xl font-semibold text-slate-900">Register</h2>
+              <form className="mt-6 flex flex-col gap-4" onSubmit={(e) => handleSubmit(e, "api/register")}>
+                <input
+                  className="rounded border border-slate-300 px-4 py-3 text-base text-black focus:outline-none focus:ring-2 focus:ring-green-500"
+                  name="username"
+                  placeholder="Username"
+                  required
+                />
+                <input
+                  className="rounded border border-slate-300 px-4 py-3 text-base text-black focus:outline-none focus:ring-2 focus:ring-green-500"
+                  name="password"
+                  placeholder="Password"
+                  required
+                  type="password"
+                />
+                <button
+                  disabled={isLoading}
+                  className="rounded bg-green-600 px-4 py-3 text-base font-medium text-white transition-colors hover:bg-green-700 disabled:bg-slate-400"
+                  type="submit"
+                >
+                  {isLoading ? "Registering..." : "Register"}
+                </button>
+              </form>
               <button
-                disabled={isLoading}
-                className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:bg-slate-400 transition-colors"
-                type="submit"
+                className="mt-4 w-full rounded border border-slate-200 bg-white px-4 py-3 text-base font-medium text-slate-700 transition-colors hover:bg-slate-50"
+                onClick={() => {
+                  setError(null);
+                  setMode("login");
+                }}
+                type="button"
               >
-                {isLoading ? "Logging in..." : "Login"}
+                Back to Login
               </button>
-            </form>
-          </div>
+            </>
+          )}
         </div>
       </section>
     </main>

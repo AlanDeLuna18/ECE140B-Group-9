@@ -101,10 +101,13 @@ def assign_device_to_group(group_id: str, device_id: str, db: Session = Depends(
         device = Device(device_id=device_id, name=_detected_device_name(device_id), group_id=group_id)
         db.add(device)
     elif device.group_id and device.group_id != group_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{device_id} is already assigned to {device.group_id}. Remove it there before assigning it to another plant.",
-        )
+        existing_group = db.query(PlantGroup).filter(PlantGroup.group_id == device.group_id).first()
+        if existing_group is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{device_id} is already assigned to {device.group_id}. Remove it there before assigning it to another plant.",
+            )
+        device.group_id = group_id
     else:
         device.group_id = group_id
 

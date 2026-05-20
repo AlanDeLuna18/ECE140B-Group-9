@@ -4,4 +4,6 @@
 
 void initPump();
 void setPump(bool enabled);
-void triggerPump(unsigned long durationMs);
+void startPump(unsigned long durationMs);
+void updatePump();
+bool isPumpRunning();

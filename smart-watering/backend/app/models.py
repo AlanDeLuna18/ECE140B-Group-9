@@ -49,3 +49,20 @@ class PlantGroup(Base):
     last_watered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ← ADD THIS
+
+
+class PumpCommand(Base):
+    """Server-created command for an ESP32 to execute on its next poll."""
+
+    __tablename__ = "pump_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    device_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    group_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    action: Mapped[str] = mapped_column(String, default="water", nullable=False)
+    source: Mapped[str] = mapped_column(String, default="manual", nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

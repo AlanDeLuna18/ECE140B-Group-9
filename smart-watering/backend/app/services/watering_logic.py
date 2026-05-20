@@ -3,9 +3,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.influx_client import influx_sensor_client
-from app.models import Device, PlantGroup, PlantType
+from app.models import Device, PlantGroup, PlantType, PumpCommand
 from app.schemas import SensorData, WateringDecision
-from app.services.pump_control import trigger_pump
 
 COOLDOWN_SECONDS = 30
 DEFAULT_WATERING_SECONDS = 5
@@ -87,10 +86,16 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
             plant_type,
             False,
             "none",
-            "Watering skipped because device is in cooldown period",
+            "Watering skipped because plant group is in cooldown period",
         )
 
-    trigger_pump(device.device_id, DEFAULT_WATERING_SECONDS)
+    _queue_water_command(
+        db=db,
+        device_id=device.device_id,
+        group_id=group.group_id,
+        source="auto",
+        duration_seconds=DEFAULT_WATERING_SECONDS,
+    )
     _mark_group_watered(db, group)
     db.commit()
     influx_sensor_client.write_watering_event(
@@ -113,9 +118,8 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
 
 
 def manual_water(device_id: str, db: Session, duration_seconds: int = DEFAULT_WATERING_SECONDS) -> dict[str, str | int]:
-    """Trigger mock watering manually and update persistence."""
+    """Queue watering manually for a device and update persistence."""
 
-    pump_result = trigger_pump(device_id, duration_seconds)
     device = db.query(Device).filter(Device.device_id == device_id).first()
     group_id = "unknown"
     if device is not None:
@@ -131,8 +135,33 @@ def manual_water(device_id: str, db: Session, duration_seconds: int = DEFAULT_WA
                     "duration_seconds": 0,
                     "status": "cooldown",
                 }
+            _queue_water_command(
+                db=db,
+                device_id=device.device_id,
+                group_id=group.group_id,
+                source="manual",
+                duration_seconds=duration_seconds,
+            )
             _mark_group_watered(db, group)
             db.commit()
+        else:
+            _queue_water_command(
+                db=db,
+                device_id=device.device_id,
+                group_id=device.group_id,
+                source="manual",
+                duration_seconds=duration_seconds,
+            )
+            db.commit()
+    else:
+        _queue_water_command(
+            db=db,
+            device_id=device_id,
+            group_id=None,
+            source="manual",
+            duration_seconds=duration_seconds,
+        )
+        db.commit()
 
     influx_sensor_client.write_watering_event(
         group_id=group_id,
@@ -140,13 +169,18 @@ def manual_water(device_id: str, db: Session, duration_seconds: int = DEFAULT_WA
         duration_seconds=duration_seconds,
         device_id=device_id,
     )
-    pump_result["group_id"] = group_id
-    pump_result["source"] = "manual"
-    return pump_result
+    return {
+        "device_id": device_id,
+        "group_id": group_id,
+        "action": "water",
+        "source": "manual",
+        "duration_seconds": duration_seconds,
+        "status": "queued",
+    }
 
 
 def manual_water_group(group_id: str, db: Session, duration_seconds: int = DEFAULT_WATERING_SECONDS) -> dict[str, str | int]:
-    """Trigger mock watering for a physical plant group."""
+    """Queue watering manually for the ESP32 assigned to a physical plant group."""
 
     group = db.query(PlantGroup).filter(PlantGroup.group_id == group_id).first()
     if group is not None:
@@ -159,11 +193,28 @@ def manual_water_group(group_id: str, db: Session, duration_seconds: int = DEFAU
                 "status": "cooldown",
             }
 
-        pump_result = trigger_pump(group_id, duration_seconds)
+        device = db.query(Device).filter(Device.group_id == group.group_id).order_by(Device.id).first()
+        if device is None:
+            return {
+                "group_id": group_id,
+                "device_id": None,
+                "action": "none",
+                "source": "manual",
+                "duration_seconds": 0,
+                "status": "no_device",
+            }
+
+        _queue_water_command(
+            db=db,
+            device_id=device.device_id,
+            group_id=group.group_id,
+            source="manual",
+            duration_seconds=duration_seconds,
+        )
         _mark_group_watered(db, group)
         db.commit()
     else:
-        pump_result = trigger_pump(group_id, duration_seconds)
+        device = None
 
     influx_sensor_client.write_watering_event(
         group_id=group_id,
@@ -172,10 +223,11 @@ def manual_water_group(group_id: str, db: Session, duration_seconds: int = DEFAU
     )
     return {
         "group_id": group_id,
-        "action": pump_result["action"],
+        "device_id": device.device_id if device is not None else None,
+        "action": "water" if device is not None else "none",
         "source": "manual",
-        "duration_seconds": duration_seconds,
-        "status": pump_result["status"],
+        "duration_seconds": duration_seconds if device is not None else 0,
+        "status": "queued" if device is not None else "group_not_found",
     }
 
 
@@ -190,6 +242,25 @@ def _is_group_in_cooldown(group: PlantGroup) -> bool:
 def _mark_group_watered(db: Session, group: PlantGroup) -> None:
     watered_at = datetime.utcnow()
     group.last_watered_at = watered_at
+
+
+def _queue_water_command(
+    db: Session,
+    device_id: str,
+    group_id: str | None,
+    source: str,
+    duration_seconds: int,
+) -> PumpCommand:
+    command = PumpCommand(
+        device_id=device_id,
+        group_id=group_id,
+        action="water",
+        source=source,
+        duration_seconds=duration_seconds,
+        status="pending",
+    )
+    db.add(command)
+    return command
 
 
 def _decision(

@@ -27,8 +27,8 @@ static const int TFT_DC_PIN = 14;
 static const int TFT_CS_PIN = 25;
 static const int TFT_BL_PIN = 15;
 
-// Relay safety. Many relay boards are active LOW; set this to false if needed.
-static const bool PUMP_ACTIVE_HIGH = true;
+// The tested pump relay is active LOW: HIGH is off, LOW is on.
+static const unsigned long PUMP_WATERING_DURATION_MS = 5000;
 
 // Calibrate these with your soil sensor.
 // DRY should be the analog reading in dry air/dry soil.
@@ -41,4 +41,6 @@ static const float MOISTURE_HIGH_THRESHOLD = 65.0f;
 
 // Timing.
 static const unsigned long HEARTBEAT_INTERVAL_MS = 10000;
-static const unsigned long SENSOR_POST_INTERVAL_MS = 5000;
+static const unsigned long COMMAND_POLL_INTERVAL_MS = 1000;
+static const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 500;
+static const unsigned long SENSOR_POST_INTERVAL_MS = 2000;

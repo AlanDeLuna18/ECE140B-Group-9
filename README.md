@@ -3,9 +3,10 @@
 Smart Watering is a Dockerized plant watering dashboard with:
 
 - InfluxDB for sensor readings and watering event history
-- FastAPI for backend APIs, watering decisions, and mock pump control
+- FastAPI for backend APIs, watering decisions, and ESP32 pump commands
 - SQLite for app settings such as plant types, physical plants, and devices
 - Next.js dashboard for managing plants, devices, manual watering, and sensor history
+- ESP32 firmware for sensor upload, device discovery, display, and pump command execution
 
 ## Project Structure
 
@@ -33,6 +34,11 @@ smart-watering/
     lib/
     Dockerfile
     package.json
+  firmware/
+    esp32/
+      include/
+      src/
+      platformio.ini
 ```
 
 ## Services
@@ -102,18 +108,37 @@ When sensor data is posted:
 2. It looks up the device in SQLite.
 3. It finds the plant group and plant type.
 4. It compares moisture against the plant type thresholds.
-5. If auto mode is enabled and moisture is below the minimum, mock pump control is triggered.
+5. If auto mode is enabled and moisture is below the minimum, a pump command is queued for the ESP32.
 6. Watering events are written to InfluxDB.
+
+Manual watering:
+
+1. The dashboard sends a manual water request to the backend.
+2. The backend checks the plant group's cooldown and assigned ESP32 device.
+3. If watering is allowed, a pump command is queued for that ESP32.
+4. The ESP32 polls for commands, runs the pump, then acknowledges completion.
 
 Cooldown:
 
 - Group-level cooldown is currently 30 seconds.
 - If one device waters a plant group, the group is considered in cooldown.
 
-Pump control is mocked in `backend/app/services/pump_control.py`.
+The ESP32 does not decide when to water. Auto mode, manual watering, cooldowns, and thresholds are server/dashboard decisions.
+
+## ESP32 Firmware
+
+Firmware lives in `smart-watering/firmware/esp32`.
+
+The ESP32:
+
+- Sends discovery heartbeats to `POST /api/devices/heartbeat`
+- Posts moisture readings to `POST /api/sensor-data`
+- Polls `GET /api/devices/{device_id}/commands/next`
+- Runs the active-LOW pump relay only when the backend returns a water command
+- Acknowledges completed commands with `POST /api/devices/{device_id}/commands/{command_id}/ack`
 
 ## Notes
 
-- Real ESP32 discovery is not implemented yet. `GET /api/devices/detected` returns dummy ESP32 units.
-- Pump control is mocked; no real hardware command is sent yet.
+- ESP32 discovery is heartbeat-based. `GET /api/devices/detected` returns devices seen recently.
+- Backend pump control uses queued commands that the ESP32 polls and executes.
 - Plant moisture suggestions are dummy values, not AI-generated recommendations.

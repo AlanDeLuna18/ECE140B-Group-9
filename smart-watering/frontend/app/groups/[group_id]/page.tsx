@@ -371,6 +371,11 @@ export default function GroupDetailPage() {
                   ))}
                 </select>
               </label>
+              {!addableDetectedDevices.length ? (
+                <p className="text-sm text-slate-500">
+                  No online unassigned ESP32 devices found. Make sure the ESP32 is powered on and sending heartbeats to the backend.
+                </p>
+              ) : null}
               <button
                 className="w-fit rounded-md bg-ink px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-300"
                 disabled={selectedDeviceUnavailable}

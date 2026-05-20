@@ -140,3 +140,15 @@ class PumpActionResponse(BaseModel):
     source: str = "manual"
     duration_seconds: int
     status: str
+
+
+class DeviceCommandResponse(BaseModel):
+    command_id: int | None = None
+    action: str = "none"
+    group_id: str | None = None
+    source: str | None = None
+    duration_seconds: int = 0
+
+
+class CommandAck(BaseModel):
+    status: str = Field(default="completed", examples=["completed"])
