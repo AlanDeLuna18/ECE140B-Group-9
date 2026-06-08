@@ -11,11 +11,13 @@ unsigned long pumpDurationMs = 0;
 void initPump() {
   pinMode(PUMP_RELAY_PIN, OUTPUT);
   setPump(false);
-  Serial.println("[Pump] Initialized OFF.");
+  Serial.printf("[Pump] Initialized OFF on pin %d. Relay active %s.\n", PUMP_RELAY_PIN, PUMP_RELAY_ACTIVE_LOW ? "LOW" : "HIGH");
 }
 
 void setPump(bool enabled) {
-  digitalWrite(PUMP_RELAY_PIN, enabled ? LOW : HIGH);
+  const int onLevel = PUMP_RELAY_ACTIVE_LOW ? LOW : HIGH;
+  const int offLevel = PUMP_RELAY_ACTIVE_LOW ? HIGH : LOW;
+  digitalWrite(PUMP_RELAY_PIN, enabled ? onLevel : offLevel);
 }
 
 void startPump(unsigned long durationMs) {

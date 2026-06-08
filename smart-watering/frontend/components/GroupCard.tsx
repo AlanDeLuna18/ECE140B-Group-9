@@ -84,7 +84,7 @@ export default function GroupCard({
     setMessage("Sending manual water command...");
     try {
       const result = await manualWaterGroup(group.group_id);
-      setMessage(`Manual water sent: ${result.status}`);
+      setMessage(formatPumpResult(result));
       onWatered(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Manual watering failed");
@@ -170,6 +170,16 @@ export default function GroupCard({
       {message ? <p className="mt-3 text-sm text-leaf">{message}</p> : null}
     </article>
   );
+}
+
+function formatPumpResult(result: PumpResult) {
+  if (result.status === "queued") {
+    return `Manual water queued${result.command_id ? ` (#${result.command_id})` : ""}`;
+  }
+  if (result.status === "already_queued") {
+    return `Water command already queued${result.command_id ? ` (#${result.command_id})` : ""}`;
+  }
+  return `Manual water: ${result.status}`;
 }
 
 function TrashIcon() {

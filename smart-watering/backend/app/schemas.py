@@ -27,6 +27,7 @@ class WateringDecision(BaseModel):
     should_water: bool
     pump_action: str
     reason: str
+    command_id: int | None = None
 
 
 class PlantTypeCreate(BaseModel):
@@ -134,6 +135,7 @@ class PlantGroupDetail(BaseModel):
 
 
 class PumpActionResponse(BaseModel):
+    command_id: int | None = None
     group_id: str | None = None
     device_id: str | None = None
     action: str

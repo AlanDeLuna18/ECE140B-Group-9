@@ -19,6 +19,7 @@ static const char* FIRMWARE_VERSION = "0.1.0";
 // Hardware pins.
 static const int SOIL_SENSOR_PIN = 32;
 static const int PUMP_RELAY_PIN = 4;
+static const bool PUMP_RELAY_ACTIVE_LOW = true;
 
 static const int TFT_CLK_PIN = 26;
 static const int TFT_MOSI_PIN = 27;
@@ -27,7 +28,8 @@ static const int TFT_DC_PIN = 14;
 static const int TFT_CS_PIN = 25;
 static const int TFT_BL_PIN = 15;
 
-// The tested pump relay is active LOW: HIGH is off, LOW is on.
+// Set PUMP_RELAY_ACTIVE_LOW to true for relay modules where LOW is on and HIGH is off.
+// Set it to false for transistor/MOSFET drivers or relay modules where HIGH is on.
 static const unsigned long PUMP_WATERING_DURATION_MS = 5000;
 
 // Calibrate these with your soil sensor.

@@ -3,7 +3,6 @@
 #include <Adafruit_GC9A01A.h>
 #include <Adafruit_GFX.h>
 #include <Arduino.h>
-#include <WiFi.h>
 
 #include "config.h"
 
@@ -104,9 +103,9 @@ void initDisplay() {
 void updateWifiStatus() {
   tft.fillRect(70, 204, 110, 14, DISPLAY_WHITE);
   tft.setTextSize(2);
-  tft.setTextColor(WiFi.status() == WL_CONNECTED ? DISPLAY_GREEN : DISPLAY_RED);
+  tft.setTextColor(DISPLAY_GREEN);
   tft.setCursor(80, 204);
-  tft.print(WiFi.status() == WL_CONNECTED ? "Online" : "Offline");
+  tft.print("Serial");
 }
 
 void showStartupDisplay() {

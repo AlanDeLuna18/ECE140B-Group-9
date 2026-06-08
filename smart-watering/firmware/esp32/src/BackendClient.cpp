@@ -141,7 +141,11 @@ PumpCommand fetchNextPumpCommand() {
     return {false, 0, 0};
   }
 
-  const int durationSeconds = response["duration_seconds"] | 5;
+  int durationSeconds = response["duration_seconds"] | static_cast<int>(PUMP_WATERING_DURATION_MS / 1000UL);
+  if (durationSeconds <= 0) {
+    durationSeconds = static_cast<int>(PUMP_WATERING_DURATION_MS / 1000UL);
+  }
+
   Serial.printf("[Command] Water command #%d for %d seconds.\n", commandId, durationSeconds);
   return {true, commandId, static_cast<unsigned long>(durationSeconds) * 1000UL};
 }

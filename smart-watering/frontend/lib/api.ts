@@ -105,6 +105,7 @@ export type DetectedDevice = {
 };
 
 export type PumpResult = {
+  command_id?: number | null;
   group_id?: string | null;
   device_id?: string | null;
   action: string;

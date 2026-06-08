@@ -6,7 +6,8 @@ import GroupCard from "@/components/GroupCard";
 import PlantCard from "@/components/PlantCard";
 import { getDevices, getPlantGroups, getPlantTypes, getSensorHistory, logout } from "@/lib/api";
 import type { Device, PlantGroup, PlantType, PumpResult, SensorHistoryPoint } from "@/lib/api";
-import { useCallback, useEffect, useState } from "react";
+import { withDemoSensorHistory } from "@/lib/demoData";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const AUTO_REFRESH_INTERVAL_MS = 2000;
@@ -21,6 +22,17 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [showPlantTypeForm, setShowPlantTypeForm] = useState(false);
   const [showPlantForm, setShowPlantForm] = useState(false);
+  const [serialConnected, setSerialConnected] = useState(false);
+  const devicesRef = useRef<Device[]>([]);
+  const serialConnectedRef = useRef(false);
+
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  useEffect(() => {
+    serialConnectedRef.current = serialConnected;
+  }, [serialConnected]);
 
   const loadDashboard = useCallback(async (showSyncedStatus = true) => {
     setError(null);
@@ -42,7 +54,21 @@ export default function DashboardPage() {
           }
         })
       );
-      setSensorHistoryByGroup(Object.fromEntries(historyEntries));
+      if (!serialConnectedRef.current) {
+        const backendHistory = Object.fromEntries(historyEntries);
+        setSensorHistoryByGroup(
+          Object.fromEntries(
+            plantGroupData.map((group) => [
+              group.group_id,
+              withDemoSensorHistory(
+                group,
+                plantTypeData.find((plantType) => plantType.plant_type_id === group.plant_type_id),
+                backendHistory[group.group_id] ?? [],
+              ),
+            ]),
+          ),
+        );
+      }
       if (showSyncedStatus) {
         setStatus("Dashboard synced with FastAPI");
       }
@@ -69,8 +95,107 @@ export default function DashboardPage() {
     router.push("/login");
   }
 
+  async function handleSerialConnect() {
+    const nav = navigator as Navigator & {
+      serial?: {
+        requestPort: () => Promise<{
+          open: (options: { baudRate: number }) => Promise<void>;
+          readable: ReadableStream<Uint8Array> | null;
+        }>;
+      };
+    };
+
+    if (!nav.serial) {
+      setError("This browser does not support Web Serial. Use Chrome or Edge for the serial demo.");
+      return;
+    }
+
+    setError(null);
+    setStatus("Select the ESP32 serial port...");
+
+    try {
+      const port = await nav.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      setSerialConnected(true);
+      setStatus("ESP32 serial demo connected");
+
+      const reader = port.readable?.getReader();
+      if (!reader) {
+        throw new Error("Serial port is not readable");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (!value) {
+          continue;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          ingestSerialLine(line.trim());
+        }
+      }
+    } catch (err) {
+      setSerialConnected(false);
+      setError(err instanceof Error ? err.message : "Serial connection failed");
+      setStatus("ESP32 serial demo disconnected");
+    }
+  }
+
+  function ingestSerialLine(line: string) {
+    if (!line.startsWith("SENSOR_JSON:")) {
+      return;
+    }
+
+    try {
+      const reading = JSON.parse(line.slice("SENSOR_JSON:".length)) as {
+        device_id?: string;
+        name?: string;
+        moisture?: number;
+        temperature?: number;
+      };
+      if (!reading.device_id || typeof reading.moisture !== "number") {
+        return;
+      }
+
+      const device = devicesRef.current.find((item) => item.device_id === reading.device_id);
+      if (!device?.group_id) {
+        setStatus(`Serial reading from ${reading.device_id}; assign it to a plant to show it`);
+        return;
+      }
+
+      const point: SensorHistoryPoint = {
+        time: new Date().toISOString(),
+        device_id: reading.device_id,
+        moisture: reading.moisture,
+        temperature: typeof reading.temperature === "number" ? reading.temperature : null,
+      };
+
+      setSensorHistoryByGroup((current) => {
+        const existing = current[device.group_id ?? ""] ?? [];
+        return {
+          ...current,
+          [device.group_id ?? ""]: [...existing.slice(-119), point],
+        };
+      });
+      setStatus(`Serial moisture ${reading.moisture.toFixed(1)}% from ${reading.device_id}`);
+    } catch {
+      setStatus("Ignored malformed serial sensor line");
+    }
+  }
+
   function handleWatered(result: PumpResult) {
-    setStatus(`Manual watering sent to ${result.group_id}: ${result.status}`);
+    const commandLabel = result.command_id ? ` command #${result.command_id}` : "";
+    setStatus(`Manual watering ${result.status}${commandLabel} for ${result.group_id ?? result.device_id ?? "device"}`);
     loadDashboard();
   }
 
@@ -105,6 +230,17 @@ export default function DashboardPage() {
             <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
               {status}
             </div>
+            <button
+              className={`rounded-lg border px-4 py-3 text-sm font-medium shadow-sm transition-colors ${
+                serialConnected
+                  ? "border-green-200 bg-green-50 text-green-700"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+              onClick={handleSerialConnect}
+              type="button"
+            >
+              {serialConnected ? "Serial Connected" : "Connect ESP32 Serial"}
+            </button>
             <button
               className="rounded-lg border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 shadow-sm hover:bg-red-50 transition-colors"
               onClick={handleLogout}

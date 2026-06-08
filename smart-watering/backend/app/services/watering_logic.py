@@ -89,7 +89,20 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
             "Watering skipped because plant group is in cooldown period",
         )
 
-    _queue_water_command(
+    existing_command = _find_pending_command(db, device_id=device.device_id, group_id=group.group_id)
+    if existing_command is not None:
+        return _decision(
+            data,
+            device,
+            group,
+            plant_type,
+            True,
+            "queued",
+            "Moisture is below threshold and a pump command is already queued",
+            command_id=existing_command.id,
+        )
+
+    command = _queue_water_command(
         db=db,
         device_id=device.device_id,
         group_id=group.group_id,
@@ -112,8 +125,9 @@ def decide_and_water(data: SensorData, db: Session) -> WateringDecision:
         group,
         plant_type,
         True,
-        "pump_on",
-        "Moisture is below plant minimum threshold",
+        "queued",
+        "Moisture is below plant minimum threshold; pump command queued",
+        command_id=command.id,
     )
 
 
@@ -122,7 +136,7 @@ def manual_water(
     db: Session,
     duration_seconds: int = DEFAULT_WATERING_SECONDS,
     user_id: int | None = None,
-) -> dict[str, str | int]:
+) -> dict[str, str | int | None]:
     """Queue watering manually for a device and update persistence."""
 
     device = db.query(Device).filter(Device.device_id == device_id).first()
@@ -136,12 +150,8 @@ def manual_water(
             "status": "device_not_found",
         }
 
-    group_query = db.query(PlantGroup).filter(PlantGroup.group_id == device.group_id) if device.group_id else None
-    if group_query is not None and user_id is not None:
-        group_query = group_query.filter(PlantGroup.user_id == user_id)
-
-    group = group_query.first() if group_query is not None else None
-    if group is None:
+    group = _get_device_group(db, device, user_id)
+    if device.group_id and group is None:
         return {
             "device_id": device_id,
             "group_id": device.group_id,
@@ -151,7 +161,7 @@ def manual_water(
             "status": "no_group",
         }
 
-    if _is_group_in_cooldown(group):
+    if group is not None and _is_group_in_cooldown(group):
         return {
             "device_id": device_id,
             "group_id": group.group_id,
@@ -161,25 +171,40 @@ def manual_water(
             "status": "cooldown",
         }
 
-    _queue_water_command(
+    existing_command = _find_pending_command(db, device_id=device.device_id, group_id=group.group_id if group else None)
+    if existing_command is not None:
+        return {
+            "command_id": existing_command.id,
+            "device_id": device_id,
+            "group_id": group.group_id if group else None,
+            "action": "water",
+            "source": "manual",
+            "duration_seconds": existing_command.duration_seconds,
+            "status": "already_queued",
+        }
+
+    command = _queue_water_command(
         db=db,
         device_id=device.device_id,
-        group_id=group.group_id,
+        group_id=group.group_id if group else None,
         source="manual",
         duration_seconds=duration_seconds,
     )
-    _mark_group_watered(db, group)
+    if group is not None:
+        _mark_group_watered(db, group)
     db.commit()
 
-    influx_sensor_client.write_watering_event(
-        group_id=group.group_id,
-        source="manual",
-        duration_seconds=duration_seconds,
-        device_id=device_id,
-    )
+    if group is not None:
+        influx_sensor_client.write_watering_event(
+            group_id=group.group_id,
+            source="manual",
+            duration_seconds=duration_seconds,
+            device_id=device_id,
+        )
     return {
+        "command_id": command.id,
         "device_id": device_id,
-        "group_id": group.group_id,
+        "group_id": group.group_id if group else None,
         "action": "water",
         "source": "manual",
         "duration_seconds": duration_seconds,
@@ -192,7 +217,7 @@ def manual_water_group(
     db: Session,
     duration_seconds: int = DEFAULT_WATERING_SECONDS,
     user_id: int | None = None,
-) -> dict[str, str | int]:
+) -> dict[str, str | int | None]:
     """Queue watering manually for the ESP32 assigned to a physical plant group."""
 
     group_query = db.query(PlantGroup).filter(PlantGroup.group_id == group_id)
@@ -230,7 +255,19 @@ def manual_water_group(
             "status": "no_device",
         }
 
-    _queue_water_command(
+    existing_command = _find_pending_command(db, device_id=device.device_id, group_id=group.group_id)
+    if existing_command is not None:
+        return {
+            "command_id": existing_command.id,
+            "group_id": group_id,
+            "device_id": device.device_id,
+            "action": "water",
+            "source": "manual",
+            "duration_seconds": existing_command.duration_seconds,
+            "status": "already_queued",
+        }
+
+    command = _queue_water_command(
         db=db,
         device_id=device.device_id,
         group_id=group.group_id,
@@ -247,6 +284,7 @@ def manual_water_group(
         device_id=device.device_id,
     )
     return {
+        "command_id": command.id,
         "group_id": group_id,
         "device_id": device.device_id,
         "action": "water",
@@ -269,6 +307,35 @@ def _mark_group_watered(db: Session, group: PlantGroup) -> None:
     group.last_watered_at = watered_at
 
 
+def _get_device_group(db: Session, device: Device, user_id: int | None) -> PlantGroup | None:
+    if not device.group_id:
+        return None
+
+    query = db.query(PlantGroup).filter(PlantGroup.group_id == device.group_id)
+    if user_id is not None:
+        query = query.filter(PlantGroup.user_id == user_id)
+
+    return query.first()
+
+
+def _find_pending_command(db: Session, device_id: str, group_id: str | None) -> PumpCommand | None:
+    query = (
+        db.query(PumpCommand)
+        .filter(
+            PumpCommand.device_id == device_id,
+            PumpCommand.action == "water",
+            PumpCommand.status == "pending",
+        )
+        .order_by(PumpCommand.id)
+    )
+    if group_id is None:
+        query = query.filter(PumpCommand.group_id.is_(None))
+    else:
+        query = query.filter(PumpCommand.group_id == group_id)
+
+    return query.first()
+
+
 def _queue_water_command(
     db: Session,
     device_id: str,
@@ -285,6 +352,7 @@ def _queue_water_command(
         status="pending",
     )
     db.add(command)
+    db.flush()
     return command
 
 
@@ -296,6 +364,7 @@ def _decision(
     should_water: bool,
     pump_action: str,
     reason: str,
+    command_id: int | None = None,
 ) -> WateringDecision:
     return WateringDecision(
         device_id=device.device_id,
@@ -308,4 +377,5 @@ def _decision(
         should_water=should_water,
         pump_action=pump_action,
         reason=reason,
+        command_id=command_id,
     )

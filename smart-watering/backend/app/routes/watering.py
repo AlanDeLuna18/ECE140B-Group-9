@@ -15,7 +15,7 @@ def manually_water_device(
     device_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
-) -> dict[str, str | int]:
+) -> dict[str, str | int | None]:
     """Queue a pump command for a device, independent of auto mode."""
 
     return queue_manual_water(device_id=device_id, db=db, user_id=current_user["id"])
@@ -26,7 +26,7 @@ def manually_water_group(
     group_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
-) -> dict[str, str | int]:
+) -> dict[str, str | int | None]:
     """Queue a pump command for a physical plant group."""
 
     return queue_manual_water_group(group_id=group_id, db=db, user_id=current_user["id"])
