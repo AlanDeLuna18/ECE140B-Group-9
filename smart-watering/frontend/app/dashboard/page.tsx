@@ -4,13 +4,22 @@ import CreateGroupForm from "@/components/CreateGroupForm";
 import CreatePlantForm from "@/components/CreatePlantForm";
 import GroupCard from "@/components/GroupCard";
 import PlantCard from "@/components/PlantCard";
-import { getDevices, getPlantGroups, getPlantTypes, getSensorHistory, logout } from "@/lib/api";
+import { getDevices, getPlantGroups, getPlantTypes, getSensorHistory, logout, updateGroupAutoMode } from "@/lib/api";
 import type { Device, PlantGroup, PlantType, PumpResult, SensorHistoryPoint } from "@/lib/api";
 import { withDemoSensorHistory } from "@/lib/demoData";
+import { recordSerialWateringEvent } from "@/lib/serialWateringEvents";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const AUTO_REFRESH_INTERVAL_MS = 2000;
+const SERIAL_WATER_DURATION_MS = 5000;
+const WATERING_COOLDOWN_MS = 60_000;
+
+type SerialPortHandle = {
+  open: (options: { baudRate: number }) => Promise<void>;
+  readable: ReadableStream<Uint8Array> | null;
+  writable: WritableStream<Uint8Array> | null;
+};
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -23,12 +32,34 @@ export default function DashboardPage() {
   const [showPlantTypeForm, setShowPlantTypeForm] = useState(false);
   const [showPlantForm, setShowPlantForm] = useState(false);
   const [serialConnected, setSerialConnected] = useState(false);
+  const [serialWateredAtByGroup, setSerialWateredAtByGroup] = useState<Record<string, string>>({});
   const devicesRef = useRef<Device[]>([]);
+  const plantGroupsRef = useRef<PlantGroup[]>([]);
+  const plantTypesRef = useRef<PlantType[]>([]);
+  const sensorHistoryByGroupRef = useRef<Record<string, SensorHistoryPoint[]>>({});
+  const serialWateredAtByGroupRef = useRef<Record<string, string>>({});
   const serialConnectedRef = useRef(false);
+  const serialWriterRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
 
   useEffect(() => {
     devicesRef.current = devices;
   }, [devices]);
+
+  useEffect(() => {
+    plantGroupsRef.current = plantGroups;
+  }, [plantGroups]);
+
+  useEffect(() => {
+    plantTypesRef.current = plantTypes;
+  }, [plantTypes]);
+
+  useEffect(() => {
+    sensorHistoryByGroupRef.current = sensorHistoryByGroup;
+  }, [sensorHistoryByGroup]);
+
+  useEffect(() => {
+    serialWateredAtByGroupRef.current = serialWateredAtByGroup;
+  }, [serialWateredAtByGroup]);
 
   useEffect(() => {
     serialConnectedRef.current = serialConnected;
@@ -98,10 +129,7 @@ export default function DashboardPage() {
   async function handleSerialConnect() {
     const nav = navigator as Navigator & {
       serial?: {
-        requestPort: () => Promise<{
-          open: (options: { baudRate: number }) => Promise<void>;
-          readable: ReadableStream<Uint8Array> | null;
-        }>;
+        requestPort: () => Promise<SerialPortHandle>;
       };
     };
 
@@ -116,6 +144,12 @@ export default function DashboardPage() {
     try {
       const port = await nav.serial.requestPort();
       await port.open({ baudRate: 115200 });
+      const writer = port.writable?.getWriter();
+      if (!writer) {
+        throw new Error("Serial port is not writable");
+      }
+
+      serialWriterRef.current = writer;
       setSerialConnected(true);
       setStatus("ESP32 serial demo connected");
 
@@ -146,12 +180,28 @@ export default function DashboardPage() {
       }
     } catch (err) {
       setSerialConnected(false);
+      serialWriterRef.current = null;
       setError(err instanceof Error ? err.message : "Serial connection failed");
       setStatus("ESP32 serial demo disconnected");
     }
   }
 
   function ingestSerialLine(line: string) {
+    if (line.startsWith("WATER_ACK:")) {
+      try {
+        const ack = JSON.parse(line.slice("WATER_ACK:".length)) as { status?: string; duration_ms?: number };
+        setStatus(`ESP32 watering ${ack.status ?? "ack"}${ack.duration_ms ? ` for ${(ack.duration_ms / 1000).toFixed(1)}s` : ""}`);
+      } catch {
+        setStatus("ESP32 watering acknowledged");
+      }
+      return;
+    }
+
+    if (line.startsWith("SERIAL_ERROR:")) {
+      setStatus("ESP32 serial command error");
+      return;
+    }
+
     if (!line.startsWith("SENSOR_JSON:")) {
       return;
     }
@@ -187,16 +237,113 @@ export default function DashboardPage() {
           [device.group_id ?? ""]: [...existing.slice(-119), point],
         };
       });
-      setStatus(`Serial moisture ${reading.moisture.toFixed(1)}% from ${reading.device_id}`);
+      maybeAutoWater(device.group_id, reading.moisture);
     } catch {
       setStatus("Ignored malformed serial sensor line");
     }
   }
 
+  function isGroupInSerialCooldown(groupId: string) {
+    const lastWateredAt = serialWateredAtByGroupRef.current[groupId];
+    if (!lastWateredAt) {
+      return false;
+    }
+
+    return Date.now() - new Date(lastWateredAt).getTime() < WATERING_COOLDOWN_MS;
+  }
+
+  function markSerialWatered(groupId: string) {
+    const timestamp = new Date().toISOString();
+    serialWateredAtByGroupRef.current = {
+      ...serialWateredAtByGroupRef.current,
+      [groupId]: timestamp,
+    };
+    setSerialWateredAtByGroup(serialWateredAtByGroupRef.current);
+  }
+
+  async function sendSerialWaterCommand(group: PlantGroup, source: "manual" | "auto") {
+    const writer = serialWriterRef.current;
+    if (!writer) {
+      throw new Error("Connect ESP32 Serial before watering from the dashboard.");
+    }
+
+    await writer.write(new TextEncoder().encode(`WATER:${SERIAL_WATER_DURATION_MS}\n`));
+    markSerialWatered(group.group_id);
+    recordSerialWateringEvent({
+      groupId: group.group_id,
+      source,
+      durationSeconds: SERIAL_WATER_DURATION_MS / 1000,
+      moisture: getLatestMoisture(group.group_id),
+    });
+    setStatus(`${source === "auto" ? "Auto" : "Manual"} watering sent to ESP32 for ${group.name}`);
+  }
+
+  function getLatestMoisture(groupId: string) {
+    const latest = (sensorHistoryByGroupRef.current[groupId] ?? [])
+      .filter((point) => point.moisture !== null)
+      .reduce<SensorHistoryPoint | null>((currentLatest, point) => {
+        if (!currentLatest) {
+          return point;
+        }
+        return new Date(point.time).getTime() > new Date(currentLatest.time).getTime() ? point : currentLatest;
+      }, null);
+
+    return latest?.moisture ?? null;
+  }
+
+  function maybeAutoWater(groupId: string, moisture: number) {
+    const group = plantGroupsRef.current.find((item) => item.group_id === groupId);
+    if (!group) {
+      setStatus(`Serial moisture ${moisture.toFixed(1)}% from ${groupId}`);
+      return;
+    }
+
+    const plantType = plantTypesRef.current.find((type) => type.plant_type_id === group.plant_type_id);
+    if (!group.auto_mode || !plantType || moisture >= plantType.ideal_moisture_min) {
+      setStatus(`Serial moisture ${moisture.toFixed(1)}% from ${group.name}`);
+      return;
+    }
+
+    if (isGroupInSerialCooldown(group.group_id)) {
+      setStatus(`Auto water waiting for cooldown: ${moisture.toFixed(1)}% from ${group.name}`);
+      return;
+    }
+
+    void sendSerialWaterCommand(group, "auto").catch((err) => {
+      setError(err instanceof Error ? err.message : "Auto watering failed");
+      setStatus("Auto watering failed");
+    });
+  }
+
   function handleWatered(result: PumpResult) {
     const commandLabel = result.command_id ? ` command #${result.command_id}` : "";
+    if (result.source === "serial") {
+      setStatus(`ESP32 watering command sent for ${result.group_id ?? result.device_id ?? "device"}`);
+      return;
+    }
+
     setStatus(`Manual watering ${result.status}${commandLabel} for ${result.group_id ?? result.device_id ?? "device"}`);
     loadDashboard();
+  }
+
+  async function handleToggleAutoMode(group: PlantGroup) {
+    await updateGroupAutoMode(group.group_id, !group.auto_mode);
+    setStatus(`Auto water ${group.auto_mode ? "turned off" : "turned on"} for ${group.name}`);
+    await loadDashboard(false);
+  }
+
+  async function handleSerialWater(group: PlantGroup): Promise<PumpResult> {
+    await sendSerialWaterCommand(group, "manual");
+
+    return {
+      action: "water",
+      source: "serial",
+      duration_seconds: SERIAL_WATER_DURATION_MS / 1000,
+      status: "sent_to_esp32",
+      group_id: group.group_id,
+      device_id: null,
+      command_id: null,
+    };
   }
 
   function togglePlantTypeForm() {
@@ -287,8 +434,11 @@ export default function DashboardPage() {
                   deviceCount={devices.filter((device) => device.group_id === group.group_id).length}
                   group={group}
                   key={group.id}
+                  lastWateredAtOverride={serialWateredAtByGroup[group.group_id] ?? null}
                   moistureStatus={getMoistureStatus(group, plantTypes, sensorHistoryByGroup[group.group_id] ?? [])}
                   onDeleted={loadDashboard}
+                  onSerialWater={serialConnected ? handleSerialWater : undefined}
+                  onToggleAutoMode={handleToggleAutoMode}
                   onWatered={handleWatered}
                   plantTypes={plantTypes}
                 />

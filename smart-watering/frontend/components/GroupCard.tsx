@@ -5,7 +5,7 @@ import type { PlantGroup, PlantType, PumpResult } from "@/lib/api";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-const COOLDOWN_SECONDS = 30;
+const COOLDOWN_SECONDS = 60;
 
 function formatDate(value: string | null) {
   if (!value) {
@@ -34,14 +34,20 @@ export default function GroupCard({
   plantTypes,
   deviceCount,
   onWatered,
+  onSerialWater,
+  onToggleAutoMode,
   onDeleted,
   moistureStatus,
+  lastWateredAtOverride,
 }: {
   group: PlantGroup;
   plantTypes: PlantType[];
   deviceCount: number;
   onWatered: (result: PumpResult) => void;
+  onSerialWater?: (group: PlantGroup) => Promise<PumpResult>;
+  onToggleAutoMode: (group: PlantGroup) => Promise<void>;
   onDeleted: () => void;
+  lastWateredAtOverride?: string | null;
   moistureStatus: {
     level: "low" | "good" | "high" | "none";
     label: string;
@@ -50,11 +56,14 @@ export default function GroupCard({
 }) {
   const plantType = plantTypes.find((type) => type.plant_type_id === group.plant_type_id);
   const [isWatering, setIsWatering] = useState(false);
+  const [isTogglingAuto, setIsTogglingAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
-  const cooldownRemaining = getCooldownRemainingSeconds(group.last_watered_at, now);
+  const effectiveLastWateredAt = lastWateredAtOverride ?? group.last_watered_at;
+  const cooldownRemaining = getCooldownRemainingSeconds(effectiveLastWateredAt, now);
   const isInCooldown = cooldownRemaining > 0;
+  const cooldownBlocksWatering = isInCooldown;
   const moistureStyle = {
     low: "bg-red-50 text-red-700 ring-red-100",
     good: "bg-green-50 text-green-700 ring-green-100",
@@ -74,16 +83,16 @@ export default function GroupCard({
   }, []);
 
   async function handleManualWater() {
-    if (isInCooldown) {
+    if (cooldownBlocksWatering) {
       setMessage(`Watering disabled for ${cooldownRemaining}s cooldown`);
       return;
     }
 
     setIsWatering(true);
     setError(null);
-    setMessage("Sending manual water command...");
+    setMessage(onSerialWater ? "Sending ESP32 serial water command..." : "Sending manual water command...");
     try {
-      const result = await manualWaterGroup(group.group_id);
+      const result = onSerialWater ? await onSerialWater(group) : await manualWaterGroup(group.group_id);
       setMessage(formatPumpResult(result));
       onWatered(result);
     } catch (err) {
@@ -91,6 +100,21 @@ export default function GroupCard({
       setMessage(null);
     } finally {
       setIsWatering(false);
+    }
+  }
+
+  async function handleToggleAutoMode() {
+    setIsTogglingAuto(true);
+    setError(null);
+    setMessage(`${group.auto_mode ? "Turning off" : "Turning on"} auto water...`);
+    try {
+      await onToggleAutoMode(group);
+      setMessage(`Auto water ${group.auto_mode ? "off" : "on"}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Auto water update failed");
+      setMessage(null);
+    } finally {
+      setIsTogglingAuto(false);
     }
   }
 
@@ -156,11 +180,19 @@ export default function GroupCard({
       <div className="mt-5 grid grid-cols-2 gap-3">
         <button
           className="rounded-md bg-leaf px-4 py-2 text-sm font-semibold text-white transition hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-          disabled={isWatering || isInCooldown}
+          disabled={isWatering || cooldownBlocksWatering}
           onClick={handleManualWater}
           type="button"
         >
-          {isWatering ? "Watering..." : isInCooldown ? `Cooldown ${cooldownRemaining}s` : "Manual Water Plant"}
+          {isWatering ? "Watering..." : cooldownBlocksWatering ? `Cooldown ${cooldownRemaining}s` : "Manual Water Plant"}
+        </button>
+        <button
+          className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-ink transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          disabled={isTogglingAuto}
+          onClick={handleToggleAutoMode}
+          type="button"
+        >
+          {isTogglingAuto ? "Updating..." : group.auto_mode ? "Turn Auto Water Off" : "Turn Auto Water On"}
         </button>
         <Link className="rounded-md border border-slate-300 px-4 py-2 text-center text-sm font-semibold text-ink hover:bg-slate-50" href={`/groups/${group.group_id}`}>
           More Info
@@ -178,6 +210,9 @@ function formatPumpResult(result: PumpResult) {
   }
   if (result.status === "already_queued") {
     return `Water command already queued${result.command_id ? ` (#${result.command_id})` : ""}`;
+  }
+  if (result.status === "sent_to_esp32") {
+    return `ESP32 watering command sent`;
   }
   return `Manual water: ${result.status}`;
 }

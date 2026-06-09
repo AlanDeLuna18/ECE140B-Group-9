@@ -12,16 +12,25 @@ import {
 } from "@/lib/api";
 import type { DetectedDevice, PlantGroupDetail, PumpResult, SensorHistoryPoint, WateringEventPoint } from "@/lib/api";
 import { getDemoWateringEvents, withDemoSensorHistory } from "@/lib/demoData";
+import { getSerialWateringEvents, recordSerialWateringEvent } from "@/lib/serialWateringEvents";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-const COOLDOWN_SECONDS = 30;
+const COOLDOWN_SECONDS = 60;
 const AUTO_REFRESH_INTERVAL_MS = 2000;
 const DEVICE_ONLINE_WINDOW_SECONDS = 20;
 const DEVICE_LINE_COLORS = ["#2f7d59", "#2563eb", "#9333ea", "#dc2626", "#0f766e", "#b45309"];
 const GAUGE_PATH_LENGTH = 126;
+const SERIAL_WATER_DURATION_MS = 5000;
+const WATERING_COOLDOWN_MS = 60_000;
+
+type SerialPortHandle = {
+  open: (options: { baudRate: number }) => Promise<void>;
+  readable: ReadableStream<Uint8Array> | null;
+  writable: WritableStream<Uint8Array> | null;
+};
 
 function formatDate(value: string | null) {
   if (!value) {
@@ -117,13 +126,17 @@ export default function GroupDetailPage() {
   const [serialConnected, setSerialConnected] = useState(false);
   const [sensorHistory, setSensorHistory] = useState<SensorHistoryPoint[]>([]);
   const [wateringEvents, setWateringEvents] = useState<WateringEventPoint[]>([]);
+  const [serialWateringEvents, setSerialWateringEvents] = useState<WateringEventPoint[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [status, setStatus] = useState("Loading plant...");
   const [error, setError] = useState<string | null>(null);
   const [wateringEventPage, setWateringEventPage] = useState(1);
+  const [serialLastWateredAt, setSerialLastWateredAt] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const serialConnectedRef = useRef(false);
   const detailRef = useRef<PlantGroupDetail | null>(null);
+  const serialWriterRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
+  const serialLastWateredAtRef = useRef<string | null>(null);
 
   useEffect(() => {
     serialConnectedRef.current = serialConnected;
@@ -132,6 +145,10 @@ export default function GroupDetailPage() {
   useEffect(() => {
     detailRef.current = detail;
   }, [detail]);
+
+  useEffect(() => {
+    serialLastWateredAtRef.current = serialLastWateredAt;
+  }, [serialLastWateredAt]);
 
   const loadGroup = useCallback(async (showSyncedStatus = true) => {
     setError(null);
@@ -178,7 +195,21 @@ export default function GroupDetailPage() {
     setWateringEventPage(1);
   }, [groupId, wateringEvents.length]);
 
+  useEffect(() => {
+    setSerialWateringEvents(getSerialWateringEvents(groupId));
+  }, [groupId]);
+
   async function handleManualWater() {
+    if (isSerialCooldownActive() || (detail && getCooldownRemainingSeconds(detail.group.last_watered_at, now) > 0)) {
+      setStatus("Watering disabled for cooldown");
+      return;
+    }
+
+    if (serialConnected && serialWriterRef.current) {
+      await sendSerialWaterCommand("manual");
+      return;
+    }
+
     if (detail && getCooldownRemainingSeconds(detail.group.last_watered_at, now) > 0) {
       setStatus(`Watering disabled for ${getCooldownRemainingSeconds(detail.group.last_watered_at, now)}s cooldown`);
       return;
@@ -198,10 +229,7 @@ export default function GroupDetailPage() {
   async function handleSerialConnect() {
     const nav = navigator as Navigator & {
       serial?: {
-        requestPort: () => Promise<{
-          open: (options: { baudRate: number }) => Promise<void>;
-          readable: ReadableStream<Uint8Array> | null;
-        }>;
+        requestPort: () => Promise<SerialPortHandle>;
       };
     };
 
@@ -216,6 +244,12 @@ export default function GroupDetailPage() {
     try {
       const port = await nav.serial.requestPort();
       await port.open({ baudRate: 115200 });
+      const writer = port.writable?.getWriter();
+      if (!writer) {
+        throw new Error("Serial port is not writable");
+      }
+
+      serialWriterRef.current = writer;
       setSerialConnected(true);
       setStatus("ESP32 serial demo connected");
 
@@ -245,6 +279,7 @@ export default function GroupDetailPage() {
       }
     } catch (err) {
       setSerialConnected(false);
+      serialWriterRef.current = null;
       setError(err instanceof Error ? err.message : "Serial connection failed");
       setStatus("ESP32 serial demo disconnected");
     }
@@ -270,6 +305,21 @@ export default function GroupDetailPage() {
   }
 
   function ingestSerialLine(line: string) {
+    if (line.startsWith("WATER_ACK:")) {
+      try {
+        const ack = JSON.parse(line.slice("WATER_ACK:".length)) as { status?: string; duration_ms?: number };
+        setStatus(`ESP32 watering ${ack.status ?? "ack"}${ack.duration_ms ? ` for ${(ack.duration_ms / 1000).toFixed(1)}s` : ""}`);
+      } catch {
+        setStatus("ESP32 watering acknowledged");
+      }
+      return;
+    }
+
+    if (line.startsWith("SERIAL_ERROR:")) {
+      setStatus("ESP32 serial command error");
+      return;
+    }
+
     if (line.startsWith("DEVICE_JSON:")) {
       try {
         const payload = JSON.parse(line.slice("DEVICE_JSON:".length)) as { device_id?: string; name?: string };
@@ -314,11 +364,86 @@ export default function GroupDetailPage() {
             temperature: typeof reading.temperature === "number" ? reading.temperature : null,
           },
         ]);
+        maybeAutoWater(moisture);
       }
-      setStatus(`Serial moisture ${moisture.toFixed(1)}% from ${deviceId}`);
+      if (!assignedHere) {
+        setStatus(`Serial moisture ${moisture.toFixed(1)}% from ${deviceId}`);
+      }
     } catch {
       setStatus("Ignored malformed serial sensor line");
     }
+  }
+
+  function isSerialCooldownActive() {
+    const lastWateredAt = serialLastWateredAtRef.current;
+    if (!lastWateredAt) {
+      return false;
+    }
+
+    return Date.now() - new Date(lastWateredAt).getTime() < WATERING_COOLDOWN_MS;
+  }
+
+  function markSerialWatered() {
+    const timestamp = new Date().toISOString();
+    serialLastWateredAtRef.current = timestamp;
+    setSerialLastWateredAt(timestamp);
+  }
+
+  async function sendSerialWaterCommand(source: "manual" | "auto") {
+    const writer = serialWriterRef.current;
+    if (!writer) {
+      throw new Error("Connect ESP32 Serial before watering.");
+    }
+
+    setError(null);
+    setStatus(`${source === "auto" ? "Auto" : "Manual"} watering sent to ESP32...`);
+    try {
+      await writer.write(new TextEncoder().encode(`WATER:${SERIAL_WATER_DURATION_MS}\n`));
+      markSerialWatered();
+      const event = recordSerialWateringEvent({
+        groupId,
+        source,
+        durationSeconds: SERIAL_WATER_DURATION_MS / 1000,
+        moisture: getLatestDisplayedMoisture(),
+      });
+      setSerialWateringEvents((current) => [event, ...current].slice(0, 30));
+      setStatus(`${source === "auto" ? "Auto" : "Manual"} watering command sent for ${detailRef.current?.group.name ?? groupId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Serial water command failed");
+      setStatus("ESP32 serial water command failed");
+    }
+  }
+
+  function maybeAutoWater(moisture: number) {
+    const currentDetail = detailRef.current;
+    if (!currentDetail) {
+      return;
+    }
+
+    if (!currentDetail.group.auto_mode || moisture >= currentDetail.plant_type.ideal_moisture_min) {
+      setStatus(`Serial moisture ${moisture.toFixed(1)}% from ${currentDetail.group.name}`);
+      return;
+    }
+
+    if (isSerialCooldownActive()) {
+      setStatus(`Auto water waiting for cooldown: ${moisture.toFixed(1)}% from ${currentDetail.group.name}`);
+      return;
+    }
+
+    void sendSerialWaterCommand("auto");
+  }
+
+  function getLatestDisplayedMoisture() {
+    const latest = sensorHistory
+      .filter((point) => point.moisture !== null)
+      .reduce<SensorHistoryPoint | null>((currentLatest, point) => {
+        if (!currentLatest) {
+          return point;
+        }
+        return parseTimestamp(point.time).getTime() > parseTimestamp(currentLatest.time).getTime() ? point : currentLatest;
+      }, null);
+
+    return latest?.moisture ?? null;
   }
 
   async function handleToggleAutoMode() {
@@ -423,7 +548,8 @@ export default function GroupDetailPage() {
   const currentMoisture = latestMoisturePoint?.moisture;
   const moistureGaugeValue = Math.min(100, Math.max(0, currentMoisture ?? 0));
   const moistureGaugeOffset = GAUGE_PATH_LENGTH - (moistureGaugeValue / 100) * GAUGE_PATH_LENGTH;
-  const displayWateringEvents = wateringEvents.length ? wateringEvents : getDemoWateringEvents(detail.group, currentMoisture);
+  const realWateringEvents = [...serialWateringEvents, ...wateringEvents];
+  const displayWateringEvents = realWateringEvents.length ? realWateringEvents : getDemoWateringEvents(detail.group, currentMoisture);
   const firstChartTimestamp = chartData[0]?.timestamp ?? 0;
   const lastChartTimestamp = chartData[chartData.length - 1]?.timestamp ?? 0;
   const chartEventMarkers = displayWateringEvents
@@ -432,14 +558,15 @@ export default function GroupDetailPage() {
       timestamp: parseTimestamp(event.time).getTime(),
       label: event.source === "auto" ? "Auto Water" : "Manual Water",
     }))
-    .filter((event) => Number.isFinite(event.timestamp) && event.timestamp >= firstChartTimestamp && event.timestamp <= lastChartTimestamp);
+    .filter((event) => Number.isFinite(event.timestamp));
   const eventsPerPage = 5;
   const sortedWateringEvents = [...displayWateringEvents].sort((first, second) => parseTimestamp(second.time).getTime() - parseTimestamp(first.time).getTime());
   const wateringEventPageCount = Math.max(1, Math.ceil(sortedWateringEvents.length / eventsPerPage));
   const firstWateringEventIndex = (wateringEventPage - 1) * eventsPerPage;
   const visibleWateringEvents = sortedWateringEvents.slice(firstWateringEventIndex, firstWateringEventIndex + eventsPerPage);
-  const cooldownRemaining = getCooldownRemainingSeconds(detail.group.last_watered_at, now);
+  const cooldownRemaining = getCooldownRemainingSeconds(serialLastWateredAt ?? detail.group.last_watered_at, now);
   const isInCooldown = cooldownRemaining > 0;
+  const cooldownBlocksWatering = isInCooldown;
   const allDetectedDevices = [
     ...serialDevices,
     ...detectedDevices.filter((device) => !serialDevices.some((serialDevice) => serialDevice.device_id === device.device_id)),
@@ -503,7 +630,7 @@ export default function GroupDetailPage() {
               <div className="mt-4 grid gap-3 text-sm">
                 <StatusRow label="Serial" value={serialConnected ? "Connected" : "Ready"} tone={serialConnected ? "good" : "neutral"} />
                 <StatusRow label="Auto Water" value={detail.group.auto_mode ? "Enabled" : "Disabled"} tone={detail.group.auto_mode ? "good" : "neutral"} />
-                <StatusRow label="Pump" value="Demo Disabled" tone="warn" />
+                <StatusRow label="Pump" value={serialConnected ? "Serial Ready" : "Backend Only"} tone={serialConnected ? "good" : "warn"} />
                 <StatusRow label="Last Watered" value={formatDate(detail.group.last_watered_at)} tone="neutral" />
               </div>
               <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{status}</div>
@@ -567,11 +694,11 @@ export default function GroupDetailPage() {
             <div className="mt-5 grid gap-3 sm:grid-cols-2">
               <button
                 className="rounded-md bg-leaf px-4 py-2 text-sm font-semibold text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                disabled={isInCooldown}
+                disabled={cooldownBlocksWatering}
                 onClick={handleManualWater}
                 type="button"
               >
-                {isInCooldown ? `Cooldown ${cooldownRemaining}s` : "Manual Water Plant"}
+                {cooldownBlocksWatering ? `Cooldown ${cooldownRemaining}s` : "Manual Water Plant"}
               </button>
               <button className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-ink hover:bg-slate-50" onClick={handleToggleAutoMode} type="button">
                 {detail.group.auto_mode ? "Turn Auto Water Off" : "Turn Auto Water On"}
@@ -587,7 +714,7 @@ export default function GroupDetailPage() {
               <InsightCard label="Room Temp" value={`${displayMetrics.roomTemp} C`} detail="display estimate" />
               <InsightCard label="Humidity" value={`${displayMetrics.humidity}%`} detail="display estimate" />
               <InsightCard label="Light Index" value={`${displayMetrics.lightIndex}/100`} detail="demo display" />
-              <InsightCard label="Care Events" value={`${displayWateringEvents.length}`} detail={wateringEvents.length ? "watering records" : "demo records"} />
+              <InsightCard label="Care Events" value={`${displayWateringEvents.length}`} detail={realWateringEvents.length ? "watering records" : "demo records"} />
             </div>
           </article>
         </section>
